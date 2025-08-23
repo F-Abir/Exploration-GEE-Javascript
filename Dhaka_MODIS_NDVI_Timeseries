@@ -1,0 +1,46 @@
+
+// Define a polygon around Dhaka city manually
+var Dhaka = ee.FeatureCollection([
+  ee.Feature(
+    ee.Geometry.Polygon([
+      [[90.35, 23.90], [90.35, 23.65], [90.55, 23.65], [90.55, 23.90]]
+    ])
+  )
+]);
+
+// Define the start and end date for the time series
+var startDate = ee.Date('2015-01-01');
+var endDate = ee.Date('2024-12-31');
+
+// Load the MODIS NDVI collection
+var modisNDVI = ee.ImageCollection('MODIS/006/MOD13Q1')
+                  .filterDate(startDate, endDate)
+                  .filterBounds(Dhaka)
+                  .select('NDVI');
+
+// Create a time series chart of the mean NDVI for the study area
+var DhakaNDVIchart = ui.Chart.image.seriesByRegion({
+  imageCollection: modisNDVI,
+  regions: Dhaka,
+  reducer: ee.Reducer.mean(),
+  scale: 250,
+  xProperty: 'system:time_start',
+  seriesProperty: 'label'
+}).setChartType('LineChart');
+
+// Set the chart title and axis labels
+DhakaNDVIchart.setOptions({
+  title: 'Time Series of MODIS NDVI for Dhaka City',
+  hAxis: {
+    title: 'Date',
+    format: 'YYYY'
+  },
+  vAxis: {
+    title: 'NDVI'
+  }
+});
+
+// Display the chart in the console and on the map
+print(DhakaNDVIchart);
+Map.addLayer(Dhaka, {}, 'Dhaka City Polygon');
+Map.centerObject(Dhaka, 10);
