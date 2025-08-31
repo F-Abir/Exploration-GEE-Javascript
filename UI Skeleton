@@ -1,0 +1,126 @@
+// ---------- DATASETS ----------
+var ADMIN = ee.FeatureCollection('FAO/GAUL/2015/level2');  // GAUL Level-2
+var COUNTRY_KEY  = 'ADM0_NAME'; // Country
+var DISTRICT_KEY = 'ADM2_NAME'; // District (Level-2)
+
+// ---------- UI LAYOUT ----------
+ui.root.clear();
+
+// Build Map widget (just to show selected AOI)
+var map = ui.Map();
+map.setOptions('HYBRID');
+
+// Left control panel
+var title = ui.Label('Country → District (GAUL 2015 L2) + Date Filters', {
+  fontWeight: 'bold', fontSize: '16px'
+});
+var hint  = ui.Label('Select Country, then District. Enter start and end dates.');
+
+// Location inputs
+var primaryLabel   = ui.Label('Country');
+var primarySelect  = ui.Select({placeholder: 'Choose a Country…', disabled: true});
+
+var secondaryLabel = ui.Label('District');
+var secondarySelect = ui.Select({placeholder: 'Choose a District…', disabled: true});
+
+var info           = ui.Label('', {color: 'azure'});
+
+// Date filters
+var filtersHeader  = ui.Label('— Date filters —', {fontWeight: 'bold', margin: '12px 0 0 0'});
+var startDateLabel = ui.Label('Start date (YYYY-MM-DD)');
+var startDateBox   = ui.Textbox({placeholder: 'e.g., 2024-01-01', value: '2024-01-01'});
+var endDateLabel   = ui.Label('End date (YYYY-MM-DD)');
+var endDateBox     = ui.Textbox({placeholder: 'e.g., 2024-12-31', value: '2024-12-31'});
+
+// Assemble left panel
+var panel = ui.Panel({
+  widgets: [
+    title,
+    hint,
+    ui.Label('— Pick locations —', {fontWeight: 'bold', margin: '12px 0 0 0'}),
+    primaryLabel, primarySelect,
+    secondaryLabel, secondarySelect,
+    info,
+    filtersHeader,
+    startDateLabel, startDateBox,
+    endDateLabel, endDateBox
+  ],
+  style: {width: '380px', padding: '8px'}
+});
+
+// SplitPanel
+var app = ui.SplitPanel({
+  firstPanel: panel,
+  secondPanel: map,
+  orientation: 'horizontal',
+  wipe: false,
+  style: {stretch: 'both'}
+});
+ui.root.add(app);
+
+// ---------- HELPERS ----------
+function showLayer(features, name){
+  if (showLayer.currentLayer) map.layers().remove(showLayer.currentLayer);
+  var styled = features.style({
+    color: 'FF8800', fillColor: '00000000', width: 2, pointSize: 6
+  });
+  showLayer.currentLayer = ui.Map.Layer(styled, {}, name);
+  map.layers().add(showLayer.currentLayer);
+  map.centerObject(features, 6);
+}
+
+// ---------- POPULATE: Country → District ----------
+function populateCountries(){
+  primarySelect.setDisabled(true);
+  primarySelect.items().reset([]);
+  secondarySelect.setDisabled(true);
+  secondarySelect.items().reset([]);
+
+  ADMIN.aggregate_array(COUNTRY_KEY).distinct().sort().evaluate(function(values){
+    values = (values || []).filter(function(v){ return v !== null; });
+    primarySelect.items().reset(values);
+    primarySelect.setDisabled(false);
+    info.setValue('Choose a Country.');
+  });
+}
+
+function populateDistricts(countryVal){
+  secondarySelect.setDisabled(true);
+  secondarySelect.items().reset([]);
+  if (countryVal == null) return;
+
+  var filtered = ADMIN.filter(ee.Filter.eq(COUNTRY_KEY, countryVal));
+  showLayer(filtered, 'Country: ' + countryVal);
+
+  filtered.aggregate_array(DISTRICT_KEY).distinct().sort().evaluate(function(values){
+    values = (values || []).filter(function(v){ return v !== null; });
+    values.unshift('All');
+    secondarySelect.items().reset(values);
+    secondarySelect.setDisabled(false);
+    secondarySelect.setValue('All', false);
+    info.setValue('Country = ' + countryVal + '. Now pick District (or All).');
+  });
+}
+
+// Handlers
+primarySelect.onChange(function(countryVal){ populateDistricts(countryVal); });
+
+secondarySelect.onChange(function(districtVal){
+  var cVal = primarySelect.getValue();
+  if (cVal == null) return;
+
+  var base = ADMIN.filter(ee.Filter.eq(COUNTRY_KEY, cVal));
+  var toShow = (districtVal === 'All' || districtVal == null)
+    ? base
+    : base.filter(ee.Filter.eq(DISTRICT_KEY, districtVal));
+
+  var label = 'Country: ' + cVal + (districtVal && districtVal !== 'All' ? (' / District: ' + districtVal) : ' (All)');
+  showLayer(toShow, label);
+
+  toShow.size().evaluate(function(n){
+    info.setValue('Showing ' + n + ' feature(s) — ' + label);
+  });
+});
+
+// Kick off
+populateCountries();
