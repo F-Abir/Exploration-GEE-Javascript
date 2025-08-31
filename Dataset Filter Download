@@ -8,7 +8,8 @@ var DISTRICT_KEY = 'ADM2_NAME';
 /*********************************
  * THEME → GROUP → DATASET (IDs) *
  *********************************
- * Each dataset entry: { type: 'ic' | 'image' | 'fc', ids: [candidate EE IDs in priority order] }
+ * Each dataset entry: { type: 'ic' | 'image', ids: [candidate EE IDs in priority order] }
+ * (All FeatureCollections removed)
  */
 var THEME_DATASETS = {
   'Imagery (Optical & Radar)': {
@@ -101,8 +102,8 @@ var THEME_DATASETS = {
 
   '💧 Watershed & Basins': {
     'HydroSHEDS / HydroBASINS': {
-      'HydroSHEDS Flow Dir': {type:'image', ids:['WWF/HydroSHEDS/15DIR']},
-      'HydroBASINS (Levelled)': {type:'fc', ids:['WWF/HydroSHEDS/HydroBASINS/standard/lev06']}
+      'HydroSHEDS Flow Dir': {type:'image', ids:['WWF/HydroSHEDS/15DIR']}
+      // (Vector HydroBASINS removed)
     }
   },
 
@@ -117,8 +118,9 @@ var THEME_DATASETS = {
 
   '🌾 Agriculture': {
     'Crop Masks & Phenology': {
-      'MCD12Q1 (LC-derived)': {type:'ic', ids:['MODIS/061/MCD12Q1','MODIS/006/MCD12Q1']},
-      'USDA CDL (US only)': {type:'ic', ids:['USDA/NASS/CDL']}
+      'MCD12Q1 (LC-derived)': {type:'ic', ids:['MODIS/061/MCD12Q1','MODIS/006/MCD12Q1']}
+      // 'USDA/NASS/CDL' is image collection but US-only; keep only if you want it:
+      // ,'USDA CDL (US only)': {type:'ic', ids:['USDA/NASS/CDL']}
     }
   },
 
@@ -133,11 +135,8 @@ var THEME_DATASETS = {
     'Lights & Power': {
       'VIIRS Nightlights (VNP46A2)': {type:'ic', ids:['NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG']},
       'DMSP-OLS (stable lights)': {type:'ic', ids:['NOAA/DMSP-OLS/NIGHTTIME_LIGHTS']}
-    },
-    'Urban & Roads': {
-      'OpenStreetMap (buildings)': {type:'fc', ids:['GOOGLE/Research/open-buildings/v3/polygons']},
-      'GRIP Global Roads': {type:'fc', ids:['Oxford/MAP/GRIP4']}
     }
+    // Vector “Urban & Roads” removed
   }
 };
 
@@ -148,8 +147,8 @@ ui.root.clear();
 var map = ui.Map();
 map.setOptions('HYBRID');
 
-var title = ui.Label('Country → District (GAUL 2015 L2) + Date + THEME datasets', {fontWeight:'bold', fontSize:'16px'});
-var hint  = ui.Label('Pick Country/District, set dates, then choose Data Type → Theme → Dataset.');
+var title = ui.Label('District-Based Image Explorer', {fontWeight:'bold', fontSize:'22px'});
+var hint  = ui.Label('By Farhan Asaf Abir', {color: 'navy', fontWeight:'bold', fontSize:'14px'} );
 
 // Location inputs
 var primaryLabel   = ui.Label('Country');
@@ -165,32 +164,25 @@ var startDateBox   = ui.Textbox({placeholder:'e.g., 2024-01-01', value:'2024-01-
 var endDateLabel   = ui.Label('End date (YYYY-MM-DD)');
 var endDateBox     = ui.Textbox({placeholder:'e.g., 2024-12-31', value:'2024-12-31'});
 
-// Data Type selector (Raster vs Vector)
-var typeHeader     = ui.Label('— Data Type —', {fontWeight:'bold', margin:'12px 0 0 0'});
-var dataTypeSelect = ui.Select({
-  items: ['Raster (Image/ImageCollection)', 'Vector (FeatureCollection)'],
-  placeholder: 'Choose Data Type…'
-});
-
-// THEME-based multi-dropdowns (filtered by data type)
+// THEME-based multi-dropdowns (raster only)
 var dsHeader       = ui.Label('— Datasets by Theme —', {fontWeight:'bold', margin:'12px 0 0 0'});
 var themeSelect    = ui.Select({placeholder:'Choose a Theme…'});
 var groupSelect    = ui.Select({placeholder:'Choose a Group…'});
 var datasetSelect  = ui.Select({placeholder:'Choose a Dataset…'});
 
 var helpNote = ui.Label(
-  'Note: Vector datasets (FeatureCollections) won’t have bands; image count applies only to ImageCollections.',
-  {color:'gray'}
+  'Note: Only raster datasets (Image/ImageCollection) are available. Image count applies to ImageCollections.',
+  {color:'brown'}
 );
 
 // Actions (buttons)
-var showBandsBtn        = ui.Button({label:'Show band details (no download)', style:{stretch:'horizontal', margin:'8px 0 0 0'}});
-var downloadBandsBtn    = ui.Button({label:'Download bands TXT (browser link)', style:{stretch:'horizontal', margin:'6px 0'}});
-var countBtn            = ui.Button({label:'Count images in range', style:{stretch:'horizontal', margin:'6px 0'}});
-var downloadCountBtn    = ui.Button({label:'Download count TXT (browser link)', style:{stretch:'horizontal', margin:'6px 0'}});
+var showBandsBtn        = ui.Button({label:'Band Details', style:{stretch:'horizontal', margin:'8px 0 0 0'}});
+var downloadBandsBtn    = ui.Button({label:'Download Band Details', style:{stretch:'horizontal', margin:'6px 0'}});
+var countBtn            = ui.Button({label:'Image Collection Count', style:{stretch:'horizontal', margin:'6px 0'}});
+var downloadCountBtn    = ui.Button({label:'Download Image Count', style:{stretch:'horizontal', margin:'6px 0'}});
 var outputPanel         = ui.Panel([], null, {margin:'6px 0 0 0'});
 
-// Panel + Split
+// Panel + Split (Data Type selector removed)
 var panel = ui.Panel({
   widgets: [
     title, hint,
@@ -199,7 +191,6 @@ var panel = ui.Panel({
     secondaryLabel, secondarySelect,
     info,
     filtersHeader, startDateLabel, startDateBox, endDateLabel, endDateBox,
-    typeHeader, dataTypeSelect,
     dsHeader, themeSelect, groupSelect, datasetSelect, helpNote,
     showBandsBtn, downloadBandsBtn, countBtn, downloadCountBtn,
     outputPanel
@@ -316,7 +307,6 @@ function makeBrowserCsvLinkFromLines(lines){
   var fc = ee.FeatureCollection(
     ee.List(lines).map(function(s){ return ee.Feature(null, {text: ee.String(s)}); })
   );
-  // Direct link (no task). Keep outputs reasonably small.
   var url = fc.getDownloadURL({
     format: 'csv',
     selectors: ['text']
@@ -324,7 +314,7 @@ function makeBrowserCsvLinkFromLines(lines){
   return url;
 }
 
-/* Resolve dataset helper (unchanged core) */
+/* Resolve dataset helper (raster only) */
 function resolveDataset(theme, group, name, cb){
   try{
     var meta = THEME_DATASETS[theme][group][name];
@@ -344,8 +334,6 @@ function resolveDataset(theme, group, name, cb){
         ee.Image(id).bandNames().evaluate(function(){
           cb(null, {id:id, type:meta.type}, meta.type);
         }, function(){ tryNext(); });
-      } else if (meta.type === 'fc'){
-        cb(null, {id:id, type:meta.type}, meta.type);
       } else {
         cb('Unknown dataset type.', null, null);
       }
@@ -397,46 +385,32 @@ secondarySelect.onChange(function(districtVal){
 });
 
 /*********************************
- * THEME UI (filtered by type)   *
+ * THEME UI (raster only)        *
  *********************************/
-function handleDataTypeChange(){
-  themeSelect.items().reset([]);
-  groupSelect.items().reset([]);
-  datasetSelect.items().reset([]);
-
-  var t = dataTypeSelect.getValue();
-  if (!t) return;
-  var wantRaster = t.indexOf('Raster') === 0;
-
+function refreshThemes(){
   var themes = [];
   Object.keys(THEME_DATASETS).forEach(function(theme){
-    var has = false;
+    // ensure theme has at least one raster dataset
     var groups = THEME_DATASETS[theme];
+    var has = false;
     Object.keys(groups).forEach(function(group){
       var ds = groups[group];
       Object.keys(ds).forEach(function(name){
         var ty = ds[name].type;
-        if ((wantRaster && (ty === 'ic' || ty === 'image')) || (!wantRaster && ty === 'fc')) has = true;
+        if (ty === 'ic' || ty === 'image') has = true;
       });
     });
     if (has) themes.push(theme);
   });
-
   themeSelect.items().reset(themes);
-  if (themes.length) {
-    themeSelect.setValue(themes[0], false);
-    handleThemeChange();
-  }
 }
 
 function handleThemeChange(){
   groupSelect.items().reset([]);
   datasetSelect.items().reset([]);
 
-  var t = dataTypeSelect.getValue();
   var theme = themeSelect.getValue();
-  if (!t || !theme) return;
-  var wantRaster = t.indexOf('Raster') === 0;
+  if (!theme) return;
 
   var groups = THEME_DATASETS[theme] || {};
   var out = [];
@@ -444,16 +418,12 @@ function handleThemeChange(){
     var ds = groups[group], has = false;
     Object.keys(ds).forEach(function(name){
       var ty = ds[name].type;
-      if ((wantRaster && (ty === 'ic' || ty === 'image')) || (!wantRaster && ty === 'fc')) has = true;
+      if (ty === 'ic' || ty === 'image') has = true;
     });
     if (has) out.push(group);
   });
 
   groupSelect.items().reset(out);
-  if (out.length) {
-    groupSelect.setValue(out[0], false);
-    handleGroupChange();
-  }
 }
 
 function handleGroupChange(){
@@ -461,22 +431,18 @@ function handleGroupChange(){
 
   var theme = themeSelect.getValue();
   var group = groupSelect.getValue();
-  var t = dataTypeSelect.getValue();
-  if (!theme || !group || !t) return;
-  var wantRaster = t.indexOf('Raster') === 0;
+  if (!theme || !group) return;
 
   var ds = (THEME_DATASETS[theme] || {})[group] || {};
   var names = Object.keys(ds).filter(function(n){
     var ty = ds[n].type;
-    return wantRaster ? (ty === 'ic' || ty === 'image') : (ty === 'fc');
+    return (ty === 'ic' || ty === 'image');
   });
 
   datasetSelect.items().reset(names);
-  if (names.length) datasetSelect.setValue(names[0], false);
 }
 
 // Wire handlers
-dataTypeSelect.onChange(handleDataTypeChange);
 themeSelect.onChange(handleThemeChange);
 groupSelect.onChange(handleGroupChange);
 
@@ -541,7 +507,7 @@ countBtn.onClick(function(){
   var group = groupSelect.getValue();
   var name  = datasetSelect.getValue();
   if (!theme || !group || !name){
-    clearOutput('Please choose Data Type, Theme, Group, and Dataset.');
+    clearOutput('Please choose Theme, Group, and Dataset.');
     return;
   }
 
@@ -553,10 +519,6 @@ countBtn.onClick(function(){
   resolveDataset(theme, group, name, function(err, ds){
     if (err){ clearOutput(err); return; }
 
-    if (ds.type === 'fc'){
-      outputPanel.add(ui.Label('FeatureCollection: image count not applicable.'));
-      return;
-    }
     if (ds.type === 'image'){
       outputPanel.add(ui.Label('Single Image dataset: count = 1'));
       return;
@@ -584,7 +546,7 @@ downloadCountBtn.onClick(function(){
   var group = groupSelect.getValue();
   var name  = datasetSelect.getValue();
   if (!theme || !group || !name){
-    clearOutput('Please choose Data Type, Theme, Group, and Dataset.');
+    clearOutput('Please choose Theme, Group, and Dataset.');
     return;
   }
 
@@ -601,12 +563,7 @@ downloadCountBtn.onClick(function(){
   resolveDataset(theme, group, name, function(err, ds){
     if (err){ clearOutput(err); return; }
 
-    if (ds.type === 'fc'){
-      clearOutput('FeatureCollection has no image count to export.');
-      return;
-    }
     if (ds.type === 'image'){
-      // Simple “count=1” lines
       var linesSingle = ee.List([
         ee.String('Dataset:\t').cat(ds.id),
         ee.String('Type:\timage'),
@@ -617,7 +574,7 @@ downloadCountBtn.onClick(function(){
         ee.String(''),
         ee.String('Total images:\t1')
       ]);
-      var urlSingle = makeBrowserCsvLinkFromLines(linesSingle);  // format:'csv'
+      var urlSingle = makeBrowserCsvLinkFromLines(linesSingle);
       outputPanel.clear();
       outputPanel.add(ui.Label('Download count CSV (text)', null, urlSingle));
       outputPanel.add(ui.Label('This is an immediate browser download (no Drive).'));
@@ -627,7 +584,7 @@ downloadCountBtn.onClick(function(){
     var col = ee.ImageCollection(ds.id).filterDate(dates.start, dates.endExclusive).filterBounds(region);
     var meta = { id: ds.id, type: ds.type, country: countryVal, district: districtVal, start: startStr, end: endStr };
     var lines = buildCountTextLines(col, meta);
-    var url = makeBrowserCsvLinkFromLines(lines);  // format:'csv'
+    var url = makeBrowserCsvLinkFromLines(lines);
     outputPanel.clear();
     outputPanel.add(ui.Label('Download count CSV (text)', null, url));
     outputPanel.add(ui.Label('This is an immediate browser download (no Drive).'));
@@ -637,9 +594,8 @@ downloadCountBtn.onClick(function(){
 /***************
  * KICK OFF    *
  ***************/
-populateCountries();
-dataTypeSelect.setValue('Raster (Image/ImageCollection)', false);
-handleDataTypeChange();
+populateCountries(); // load country list only — no auto-selects
+refreshThemes();     // populate themes list (no auto-selects)
 
 /****************************************************
  * Helper to get the currently selected ee.Image    *
@@ -649,7 +605,7 @@ function getSelectedImage(cb){
   var group = groupSelect.getValue();
   var name  = datasetSelect.getValue();
   if (!theme || !group || !name){
-    cb('Please choose Data Type, Theme, Group, and Dataset.', null, null);
+    cb('Please choose Theme, Group, and Dataset.', null, null);
     return;
   }
 
@@ -660,11 +616,6 @@ function getSelectedImage(cb){
 
   resolveDataset(theme, group, name, function(err, ds){
     if (err){ cb(err, null, null); return; }
-
-    if (ds.type === 'fc'){
-      cb('Selected dataset is a FeatureCollection; it has no bands.', null, ds);
-      return;
-    }
 
     if (ds.type === 'image'){
       cb(null, ee.Image(ds.id), ds);
@@ -687,3 +638,4 @@ function getSelectedImage(cb){
     });
   });
 }
+
