@@ -1,0 +1,689 @@
+/***********************
+ * ADMIN (GAUL) & KEYS *
+ ***********************/
+var ADMIN = ee.FeatureCollection('FAO/GAUL/2015/level2');
+var COUNTRY_KEY  = 'ADM0_NAME';
+var DISTRICT_KEY = 'ADM2_NAME';
+
+/*********************************
+ * THEME → GROUP → DATASET (IDs) *
+ *********************************
+ * Each dataset entry: { type: 'ic' | 'image' | 'fc', ids: [candidate EE IDs in priority order] }
+ */
+var THEME_DATASETS = {
+  'Imagery (Optical & Radar)': {
+    'Landsat (C2 L2 SR/T)': {
+      'LANDSAT_LT05_L2': {type:'ic', ids:['LANDSAT/LT05/C02/T1_L2']},
+      'LANDSAT_LE07_L2': {type:'ic', ids:['LANDSAT/LE07/C02/T1_L2']},
+      'LANDSAT_LC08_L2': {type:'ic', ids:['LANDSAT/LC08/C02/T1_L2']},
+      'LANDSAT_LC09_L2': {type:'ic', ids:['LANDSAT/LC09/C02/T1_L2']}
+    },
+    'Sentinel-2': {
+      'COPERNICUS/S2 (L1C TOA)': {type:'ic', ids:['COPERNICUS/S2']},
+      'COPERNICUS/S2_SR (L2A BOA)': {type:'ic', ids:['COPERNICUS/S2_SR']},
+      'COPERNICUS/S2_SR_HARMONIZED': {type:'ic', ids:['COPERNICUS/S2_SR_HARMONIZED']}
+    },
+    'Sentinel-1 SAR': {
+      'COPERNICUS/S1_GRD': {type:'ic', ids:['COPERNICUS/S1_GRD']},
+      'COPERNICUS/S1_SLC': {type:'ic', ids:['COPERNICUS/S1_SLC']}
+    },
+    'MODIS Surface Reflectance': {
+      'MOD09GA': {type:'ic', ids:['MODIS/061/MOD09GA','MODIS/006/MOD09GA']},
+      'MYD09GA': {type:'ic', ids:['MODIS/061/MYD09GA','MODIS/006/MYD09GA']},
+      'MOD09A1': {type:'ic', ids:['MODIS/061/MOD09A1','MODIS/006/MOD09A1']},
+      'MYD09A1': {type:'ic', ids:['MODIS/061/MYD09A1','MODIS/006/MYD09A1']}
+    },
+    'MODIS BRDF/Albedo': {
+      'MCD43A1': {type:'ic', ids:['MODIS/061/MCD43A1','MODIS/006/MCD43A1']},
+      'MCD43A2': {type:'ic', ids:['MODIS/061/MCD43A2','MODIS/006/MCD43A2']},
+      'MCD43A3': {type:'ic', ids:['MODIS/061/MCD43A3','MODIS/006/MCD43A3']},
+      'MCD43A4': {type:'ic', ids:['MODIS/061/MCD43A4','MODIS/006/MCD43A4']}
+    },
+    'VIIRS Surface Reflectance': {
+      'VNP09GA': {type:'ic', ids:['NOAA/VIIRS/001/VNP09GA']}
+    }
+  },
+
+  '🌱 Land & Vegetation': {
+    'MODIS Vegetation Indices': {
+      'MOD13A1': {type:'ic', ids:['MODIS/061/MOD13A1','MODIS/006/MOD13A1']},
+      'MYD13A1': {type:'ic', ids:['MODIS/061/MYD13A1','MODIS/006/MYD13A1']},
+      'MOD13A2': {type:'ic', ids:['MODIS/061/MOD13A2','MODIS/006/MOD13A2']},
+      'MYD13A2': {type:'ic', ids:['MODIS/061/MYD13A2','MODIS/006/MYD13A2']}
+    },
+    'MODIS LAI/FPAR & Productivity': {
+      'MCD15A3H (LAI/FPAR)': {type:'ic', ids:['MODIS/061/MCD15A3H','MODIS/006/MCD15A3H']},
+      'MOD17A2H (GPP/NPP)': {type:'ic', ids:['MODIS/061/MOD17A2H','MODIS/006/MOD17A2H']},
+      'MYD17A2H (GPP/NPP)': {type:'ic', ids:['MODIS/061/MYD17A2H','MODIS/006/MYD17A2H']}
+    },
+    'Land Cover & Forests': {
+      'MCD12Q1 (Land Cover)': {type:'ic', ids:['MODIS/061/MCD12Q1','MODIS/006/MCD12Q1']},
+      'Hansen GFC v1.10': {type:'ic', ids:['UMD/hansen/global_forest_change_2022_v1.10']},
+      'Copernicus Global Land Cover': {type:'ic', ids:['COPERNICUS/Landcover/100m/Proba-V/Global']}
+    },
+    'GEDI Lidar (height/biomass)': {
+      'GEDI L2A (Canopy Height)': {type:'ic', ids:['LARSE/GEDI/GEDI02_A_002']},
+      'GEDI L4A (AGB)': {type:'ic', ids:['LARSE/GEDI/GEDI04_A_002']}
+    }
+  },
+
+  '🔥 Fire & Disturbance': {
+    'MODIS Fire': {
+      'MOD14A1 (Terra)': {type:'ic', ids:['MODIS/061/MOD14A1','MODIS/006/MOD14A1']},
+      'MYD14A1 (Aqua)':  {type:'ic', ids:['MODIS/061/MYD14A1','MODIS/006/MYD14A1']},
+      'MCD14A1 (Combined)': {type:'ic', ids:['MODIS/061/MCD14A1','MODIS/006/MCD14A1']},
+      'MCD64A1 (Burned Area)': {type:'ic', ids:['MODIS/061/MCD64A1','MODIS/006/MCD64A1']}
+    },
+    'VIIRS Fire': {
+      'VNP14A1 (Active Fire/FRP)': {type:'ic', ids:['NOAA/VIIRS/001/VNP14A1']}
+    }
+  },
+
+  '🌡️ Climate & Atmosphere': {
+    'MODIS Atmosphere & LST': {
+      'MOD11A1 (LST daily)': {type:'ic', ids:['MODIS/061/MOD11A1','MODIS/006/MOD11A1']},
+      'MYD11A1 (LST daily)': {type:'ic', ids:['MODIS/061/MYD11A1','MODIS/006/MYD11A1']},
+      'MOD11A2 (LST 8-day)': {type:'ic', ids:['MODIS/061/MOD11A2','MODIS/006/MOD11A2']},
+      'MYD11A2 (LST 8-day)': {type:'ic', ids:['MODIS/061/MYD11A2','MODIS/006/MYD11A2']},
+      'MOD21A2 (alt LST)':   {type:'ic', ids:['MODIS/061/MOD21A2','MODIS/006/MOD21A2']},
+      'MOD04_L2 (Aerosol)':  {type:'ic', ids:['MODIS/061/MOD04_L2']},
+      'MOD05_L2 (Water Vapor)': {type:'ic', ids:['MODIS/061/MOD05_L2']},
+      'MOD06_L2 (Cloud)':    {type:'ic', ids:['MODIS/061/MOD06_L2']},
+      'MOD07_L2 (Profiles)': {type:'ic', ids:['MODIS/061/MOD07_L2']}
+    },
+    'Trace Gases (S5P)': {
+      'TROPOMI NO2 (NRTI)': {type:'ic', ids:['COPERNICUS/S5P/NRTI/L3_NO2']}
+    },
+    'Reanalysis & Climate': {
+      'ECMWF/ERA5/DAILY': {type:'ic', ids:['ECMWF/ERA5/DAILY']}
+    }
+  },
+
+  '💧 Watershed & Basins': {
+    'HydroSHEDS / HydroBASINS': {
+      'HydroSHEDS Flow Dir': {type:'image', ids:['WWF/HydroSHEDS/15DIR']},
+      'HydroBASINS (Levelled)': {type:'fc', ids:['WWF/HydroSHEDS/HydroBASINS/standard/lev06']}
+    }
+  },
+
+  '🏔️ Elevation & Terrain': {
+    'Global DEMs': {
+      'SRTMGL1_003 (30m)': {type:'image', ids:['USGS/SRTMGL1_003']},
+      'ALOS PALSAR DEM (12.5m)': {type:'image', ids:['JAXA/ALOS/AW3D30/V3_2']},
+      'MERIT DEM': {type:'image', ids:['MERIT/DEM/v1_0_3']},
+      'GMTED2010': {type:'image', ids:['USGS/GMTED2010']}
+    }
+  },
+
+  '🌾 Agriculture': {
+    'Crop Masks & Phenology': {
+      'MCD12Q1 (LC-derived)': {type:'ic', ids:['MODIS/061/MCD12Q1','MODIS/006/MCD12Q1']},
+      'USDA CDL (US only)': {type:'ic', ids:['USDA/NASS/CDL']}
+    }
+  },
+
+  '🏥 Health & Environment': {
+    'Population & Exposure': {
+      'WorldPop': {type:'ic', ids:['WorldPop/GP/100m/pop']},
+      'GPWv4 (pop count)': {type:'ic', ids:['CIESIN/GPWv411/GPW_Population_Count']}
+    }
+  },
+
+  '⚡ Energy & Infrastructure': {
+    'Lights & Power': {
+      'VIIRS Nightlights (VNP46A2)': {type:'ic', ids:['NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG']},
+      'DMSP-OLS (stable lights)': {type:'ic', ids:['NOAA/DMSP-OLS/NIGHTTIME_LIGHTS']}
+    },
+    'Urban & Roads': {
+      'OpenStreetMap (buildings)': {type:'fc', ids:['GOOGLE/Research/open-buildings/v3/polygons']},
+      'GRIP Global Roads': {type:'fc', ids:['Oxford/MAP/GRIP4']}
+    }
+  }
+};
+
+/****************
+ * UI LAYOUT    *
+ ****************/
+ui.root.clear();
+var map = ui.Map();
+map.setOptions('HYBRID');
+
+var title = ui.Label('Country → District (GAUL 2015 L2) + Date + THEME datasets', {fontWeight:'bold', fontSize:'16px'});
+var hint  = ui.Label('Pick Country/District, set dates, then choose Data Type → Theme → Dataset.');
+
+// Location inputs
+var primaryLabel   = ui.Label('Country');
+var primarySelect  = ui.Select({placeholder: 'Choose a Country…', disabled: true});
+var secondaryLabel = ui.Label('District');
+var secondarySelect = ui.Select({placeholder: 'Choose a District…', disabled: true});
+var info           = ui.Label('', {color: 'azure'});
+
+// Date inputs
+var filtersHeader  = ui.Label('— Date filters —', {fontWeight:'bold', margin:'12px 0 0 0'});
+var startDateLabel = ui.Label('Start date (YYYY-MM-DD)');
+var startDateBox   = ui.Textbox({placeholder:'e.g., 2024-01-01', value:'2024-01-01'});
+var endDateLabel   = ui.Label('End date (YYYY-MM-DD)');
+var endDateBox     = ui.Textbox({placeholder:'e.g., 2024-12-31', value:'2024-12-31'});
+
+// Data Type selector (Raster vs Vector)
+var typeHeader     = ui.Label('— Data Type —', {fontWeight:'bold', margin:'12px 0 0 0'});
+var dataTypeSelect = ui.Select({
+  items: ['Raster (Image/ImageCollection)', 'Vector (FeatureCollection)'],
+  placeholder: 'Choose Data Type…'
+});
+
+// THEME-based multi-dropdowns (filtered by data type)
+var dsHeader       = ui.Label('— Datasets by Theme —', {fontWeight:'bold', margin:'12px 0 0 0'});
+var themeSelect    = ui.Select({placeholder:'Choose a Theme…'});
+var groupSelect    = ui.Select({placeholder:'Choose a Group…'});
+var datasetSelect  = ui.Select({placeholder:'Choose a Dataset…'});
+
+var helpNote = ui.Label(
+  'Note: Vector datasets (FeatureCollections) won’t have bands; image count applies only to ImageCollections.',
+  {color:'gray'}
+);
+
+// Actions (buttons)
+var showBandsBtn        = ui.Button({label:'Show band details (no download)', style:{stretch:'horizontal', margin:'8px 0 0 0'}});
+var downloadBandsBtn    = ui.Button({label:'Download bands TXT (browser link)', style:{stretch:'horizontal', margin:'6px 0'}});
+var countBtn            = ui.Button({label:'Count images in range', style:{stretch:'horizontal', margin:'6px 0'}});
+var downloadCountBtn    = ui.Button({label:'Download count TXT (browser link)', style:{stretch:'horizontal', margin:'6px 0'}});
+var outputPanel         = ui.Panel([], null, {margin:'6px 0 0 0'});
+
+// Panel + Split
+var panel = ui.Panel({
+  widgets: [
+    title, hint,
+    ui.Label('— Pick locations —', {fontWeight:'bold', margin:'12px 0 0 0'}),
+    primaryLabel, primarySelect,
+    secondaryLabel, secondarySelect,
+    info,
+    filtersHeader, startDateLabel, startDateBox, endDateLabel, endDateBox,
+    typeHeader, dataTypeSelect,
+    dsHeader, themeSelect, groupSelect, datasetSelect, helpNote,
+    showBandsBtn, downloadBandsBtn, countBtn, downloadCountBtn,
+    outputPanel
+  ],
+  style: {width:'460px', padding:'8px'}
+});
+var app = ui.SplitPanel({firstPanel: panel, secondPanel: map, orientation:'horizontal', wipe:false, style:{stretch:'both'}});
+ui.root.add(app);
+
+/****************
+ * HELPERS      *
+ ****************/
+function parseDateOrNull(txt){
+  var s = (txt || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  return ee.Date(s);
+}
+function showLayer(features, name){
+  if (showLayer.currentLayer) map.layers().remove(showLayer.currentLayer);
+  var styled = features.style({color:'FF8800', fillColor:'00000000', width:2, pointSize:6});
+  showLayer.currentLayer = ui.Map.Layer(styled, {}, name);
+  map.layers().add(showLayer.currentLayer);
+  map.centerObject(features, 6);
+}
+function getRegionFromUI(){
+  var cVal = primarySelect.getValue(); if (!cVal) return null;
+  var base = ADMIN.filter(ee.Filter.eq(COUNTRY_KEY, cVal));
+  var dVal = secondarySelect.getValue();
+  var fc = (dVal === 'All' || dVal == null) ? base : base.filter(ee.Filter.eq(DISTRICT_KEY, dVal));
+  return fc.geometry();
+}
+function validateDates(){
+  var sd = parseDateOrNull(startDateBox.getValue());
+  var ed = parseDateOrNull(endDateBox.getValue());
+  if (sd === null || ed === null) return {error:'Enter valid dates as YYYY-MM-DD.'};
+  return {start: sd, endExclusive: ee.Date(ed).advance(1, 'day')};
+}
+function clearOutput(msg){
+  outputPanel.clear();
+  if (msg) outputPanel.add(ui.Label(msg));
+}
+
+/* Always return a List for system:bands */
+function getBandMetaList(image){
+  var d = ee.Dictionary(image.toDictionary(['system:bands']));
+  return ee.List(d.get('system:bands', []));
+}
+
+/* Build text LINES (ee.List<ee.String>) for bands */
+function buildBandTextLines(image, datasetId){
+  var metaBands = getBandMetaList(image);
+  var hasMeta   = ee.Number(metaBands.size()).gt(0);
+
+  var header = ee.List([
+    ee.String('Dataset:\t').cat(datasetId),
+    ee.String('Total bands:\t').cat(
+      ee.Number(
+        ee.Algorithms.If(hasMeta, metaBands.size(), image.bandNames().size())
+      ).format()
+    ),
+    ee.String(''),
+    ee.String('band\tdescription\tunits\twavelength')
+  ]);
+
+  var body = ee.List(
+    ee.Algorithms.If(
+      hasMeta,
+      metaBands.map(function(b){
+        b = ee.Dictionary(b);
+        var id    = ee.String(ee.Algorithms.If(b.contains('id'), b.get('id'),
+                      ee.Algorithms.If(b.contains('name'), b.get('name'), 'band')));
+        var desc  = ee.String(ee.Algorithms.If(b.contains('description'), b.get('description'),
+                      ee.Algorithms.If(b.contains('long_name'), b.get('long_name'),
+                      ee.Algorithms.If(b.contains('standard_name'), b.get('standard_name'), ''))));
+        var units = ee.String(ee.Algorithms.If(b.contains('units'), b.get('units'),
+                      ee.Algorithms.If(b.contains('wavelength_units'), b.get('wavelength_units'), '')));
+        var wlStr = ee.String(ee.Algorithms.If(b.contains('wavelength'),
+                      ee.Number(b.get('wavelength')).format(), ''));
+        return id.cat('\t').cat(desc).cat('\t').cat(units).cat('\t').cat(wlStr);
+      }),
+      image.bandNames().map(function(n){ return ee.String(n); })
+    )
+  );
+
+  return header.cat(body);
+}
+
+/* Build text LINES (ee.List<ee.String>) for count summary */
+function buildCountTextLines(col, meta){
+  var count = col.size();
+  var minT  = ee.Number(col.aggregate_min('system:time_start'));
+  var maxT  = ee.Number(col.aggregate_max('system:time_start'));
+
+  var minStr = ee.String(ee.Algorithms.If(count.gt(0), ee.Date(minT).format('YYYY-MM-dd'), '—'));
+  var maxStr = ee.String(ee.Algorithms.If(count.gt(0), ee.Date(maxT).format('YYYY-MM-dd'), '—'));
+
+  var lines = ee.List([
+    ee.String('Dataset:\t').cat(meta.id),
+    ee.String('Type:\t').cat(meta.type),
+    ee.String('Country:\t').cat(meta.country),
+    ee.String('District:\t').cat(meta.district),
+    ee.String('Start date:\t').cat(meta.start),
+    ee.String('End date:\t').cat(meta.end),
+    ee.String(''),
+    ee.String('Total images:\t').cat(count.format()),
+    ee.String('First acquisition:\t').cat(minStr),
+    ee.String('Last acquisition:\t').cat(maxStr)
+  ]);
+  return lines;
+}
+
+/* Build a browser download link (no Drive) from ee.List<ee.String> */
+function makeBrowserCsvLinkFromLines(lines){
+  var fc = ee.FeatureCollection(
+    ee.List(lines).map(function(s){ return ee.Feature(null, {text: ee.String(s)}); })
+  );
+  // Direct link (no task). Keep outputs reasonably small.
+  var url = fc.getDownloadURL({
+    format: 'csv',
+    selectors: ['text']
+  });
+  return url;
+}
+
+/* Resolve dataset helper (unchanged core) */
+function resolveDataset(theme, group, name, cb){
+  try{
+    var meta = THEME_DATASETS[theme][group][name];
+    if (!meta || !meta.ids || meta.ids.length === 0){
+      cb('Dataset not mapped (placeholder).', null, null);
+      return;
+    }
+    var i = 0;
+    (function tryNext(){
+      if (i >= meta.ids.length){ cb('No valid collection/image found for "'+name+'".', null, meta.type); return; }
+      var id = meta.ids[i++];
+      if (meta.type === 'ic'){
+        ee.ImageCollection(id).limit(1).size().evaluate(function(n){
+          if (n && n > 0) cb(null, {id:id, type:meta.type}, meta.type); else tryNext();
+        }, function(){ tryNext(); });
+      } else if (meta.type === 'image'){
+        ee.Image(id).bandNames().evaluate(function(){
+          cb(null, {id:id, type:meta.type}, meta.type);
+        }, function(){ tryNext(); });
+      } else if (meta.type === 'fc'){
+        cb(null, {id:id, type:meta.type}, meta.type);
+      } else {
+        cb('Unknown dataset type.', null, null);
+      }
+    })();
+  } catch(e){
+    cb('Selection incomplete.', null, null);
+  }
+}
+
+/*****************************************
+ * COUNTRY → DISTRICT POPULATION & MAP   *
+ *****************************************/
+function populateCountries(){
+  primarySelect.setDisabled(true);
+  primarySelect.items().reset([]);
+  secondarySelect.setDisabled(true);
+  secondarySelect.items().reset([]);
+  ADMIN.aggregate_array(COUNTRY_KEY).distinct().sort().evaluate(function(values){
+    values = (values || []).filter(function(v){ return v !== null; });
+    primarySelect.items().reset(values);
+    primarySelect.setDisabled(false);
+    info.setValue('Choose a Country.');
+  });
+}
+function populateDistricts(countryVal){
+  secondarySelect.setDisabled(true);
+  secondarySelect.items().reset([]);
+  if (countryVal == null) return;
+  var filtered = ADMIN.filter(ee.Filter.eq(COUNTRY_KEY, countryVal));
+  showLayer(filtered, 'Country: ' + countryVal);
+  filtered.aggregate_array(DISTRICT_KEY).distinct().sort().evaluate(function(values){
+    values = (values || []).filter(function(v){ return v !== null; });
+    values.unshift('All');
+    secondarySelect.items().reset(values);
+    secondarySelect.setDisabled(false);
+    secondarySelect.setValue('All', false);
+    info.setValue('Country = ' + countryVal + '. Now pick District (or All).');
+  });
+}
+primarySelect.onChange(function(countryVal){ populateDistricts(countryVal); });
+secondarySelect.onChange(function(districtVal){
+  var cVal = primarySelect.getValue();
+  if (cVal == null) return;
+  var base = ADMIN.filter(ee.Filter.eq(COUNTRY_KEY, cVal));
+  var toShow = (districtVal === 'All' || districtVal == null) ? base : base.filter(ee.Filter.eq(DISTRICT_KEY, districtVal));
+  var label = 'Country: ' + cVal + (districtVal && districtVal !== 'All' ? (' / District: ' + districtVal) : ' (All)');
+  showLayer(toShow, label);
+  toShow.size().evaluate(function(n){ info.setValue('Showing ' + n + ' feature(s) — ' + label); });
+});
+
+/*********************************
+ * THEME UI (filtered by type)   *
+ *********************************/
+function handleDataTypeChange(){
+  themeSelect.items().reset([]);
+  groupSelect.items().reset([]);
+  datasetSelect.items().reset([]);
+
+  var t = dataTypeSelect.getValue();
+  if (!t) return;
+  var wantRaster = t.indexOf('Raster') === 0;
+
+  var themes = [];
+  Object.keys(THEME_DATASETS).forEach(function(theme){
+    var has = false;
+    var groups = THEME_DATASETS[theme];
+    Object.keys(groups).forEach(function(group){
+      var ds = groups[group];
+      Object.keys(ds).forEach(function(name){
+        var ty = ds[name].type;
+        if ((wantRaster && (ty === 'ic' || ty === 'image')) || (!wantRaster && ty === 'fc')) has = true;
+      });
+    });
+    if (has) themes.push(theme);
+  });
+
+  themeSelect.items().reset(themes);
+  if (themes.length) {
+    themeSelect.setValue(themes[0], false);
+    handleThemeChange();
+  }
+}
+
+function handleThemeChange(){
+  groupSelect.items().reset([]);
+  datasetSelect.items().reset([]);
+
+  var t = dataTypeSelect.getValue();
+  var theme = themeSelect.getValue();
+  if (!t || !theme) return;
+  var wantRaster = t.indexOf('Raster') === 0;
+
+  var groups = THEME_DATASETS[theme] || {};
+  var out = [];
+  Object.keys(groups).forEach(function(group){
+    var ds = groups[group], has = false;
+    Object.keys(ds).forEach(function(name){
+      var ty = ds[name].type;
+      if ((wantRaster && (ty === 'ic' || ty === 'image')) || (!wantRaster && ty === 'fc')) has = true;
+    });
+    if (has) out.push(group);
+  });
+
+  groupSelect.items().reset(out);
+  if (out.length) {
+    groupSelect.setValue(out[0], false);
+    handleGroupChange();
+  }
+}
+
+function handleGroupChange(){
+  datasetSelect.items().reset([]);
+
+  var theme = themeSelect.getValue();
+  var group = groupSelect.getValue();
+  var t = dataTypeSelect.getValue();
+  if (!theme || !group || !t) return;
+  var wantRaster = t.indexOf('Raster') === 0;
+
+  var ds = (THEME_DATASETS[theme] || {})[group] || {};
+  var names = Object.keys(ds).filter(function(n){
+    var ty = ds[n].type;
+    return wantRaster ? (ty === 'ic' || ty === 'image') : (ty === 'fc');
+  });
+
+  datasetSelect.items().reset(names);
+  if (names.length) datasetSelect.setValue(names[0], false);
+}
+
+// Wire handlers
+dataTypeSelect.onChange(handleDataTypeChange);
+themeSelect.onChange(handleThemeChange);
+groupSelect.onChange(handleGroupChange);
+
+/********************************************
+ * SHOW BANDS (UI only) & DOWNLOAD LINKS    *
+ ********************************************/
+showBandsBtn.onClick(function(){
+  clearOutput('Preparing band info…');
+  getSelectedImage(function(err, image, ds){
+    if (err){ clearOutput(err); return; }
+
+    outputPanel.clear();
+    outputPanel.add(ui.Label('Dataset: ' + ds.id + '  (' + ds.type + ')', {fontWeight:'bold'}));
+
+    var bandsList = getBandMetaList(image);
+    bandsList.evaluate(function(list){
+      if (Array.isArray(list) && list.length){
+        outputPanel.add(ui.Label('Bands & descriptions:'));
+        list.forEach(function(b){
+          var idStr   = b.id || b.name || 'band';
+          var descStr = b.description || b.long_name || b.standard_name || '';
+          var units   = b.units || b.wavelength_units || '';
+          var wl      = (b.wavelength != null) ? String(b.wavelength) : '';
+          outputPanel.add(ui.Label('• ' + idStr + ' — ' + descStr + (units?(' ['+units+']'):'') + (wl?(' λ='+wl):'')));
+        });
+      } else {
+        image.bandNames().evaluate(function(names){
+          if (!names || !names.length){
+            outputPanel.add(ui.Label('No bands found (empty image or no metadata).'));
+            return;
+          }
+          outputPanel.add(ui.Label('Band names (no structured metadata):'));
+          names.forEach(function(n){ outputPanel.add(ui.Label('• ' + n)); });
+        });
+      }
+    }, function(){
+      outputPanel.add(ui.Label('Could not read band metadata.'));
+    });
+  });
+});
+
+/* Download bands TXT (browser link via getDownloadURL) */
+downloadBandsBtn.onClick(function(){
+  clearOutput('Preparing bands text link…');
+  getSelectedImage(function(err, image, ds){
+    if (err){ clearOutput(err); return; }
+    var lines = buildBandTextLines(image, ds.id);
+    var url = makeBrowserCsvLinkFromLines(lines);  // format:'csv'
+    outputPanel.clear();
+    outputPanel.add(ui.Label('Download bands CSV (text)', null, url));
+    outputPanel.add(ui.Label('This is an immediate browser download (no Drive).'));
+  });
+});
+
+/****************
+ * COUNT BUTTON *
+ ****************/
+countBtn.onClick(function(){
+  clearOutput('Counting images…');
+
+  var theme = themeSelect.getValue();
+  var group = groupSelect.getValue();
+  var name  = datasetSelect.getValue();
+  if (!theme || !group || !name){
+    clearOutput('Please choose Data Type, Theme, Group, and Dataset.');
+    return;
+  }
+
+  var dates = validateDates();
+  if (dates.error){ clearOutput(dates.error); return; }
+  var region = getRegionFromUI();
+  if (!region){ clearOutput('Please select a Country/District first.'); return; }
+
+  resolveDataset(theme, group, name, function(err, ds){
+    if (err){ clearOutput(err); return; }
+
+    if (ds.type === 'fc'){
+      outputPanel.add(ui.Label('FeatureCollection: image count not applicable.'));
+      return;
+    }
+    if (ds.type === 'image'){
+      outputPanel.add(ui.Label('Single Image dataset: count = 1'));
+      return;
+    }
+
+    var col = ee.ImageCollection(ds.id).filterDate(dates.start, dates.endExclusive).filterBounds(region);
+    col.size().evaluate(function(n){
+      outputPanel.clear();
+      outputPanel.add(ui.Label('Dataset: ' + ds.id, {fontWeight:'bold'}));
+      outputPanel.add(ui.Label('Images matching filters: ' + (n || 0)));
+    }, function(err2){
+      outputPanel.clear();
+      outputPanel.add(ui.Label('Failed to count images: ' + err2));
+    });
+  });
+});
+
+/*****************************************
+ * DOWNLOAD COUNT TXT (browser link)
+ *****************************************/
+downloadCountBtn.onClick(function(){
+  clearOutput('Preparing count text link…');
+
+  var theme = themeSelect.getValue();
+  var group = groupSelect.getValue();
+  var name  = datasetSelect.getValue();
+  if (!theme || !group || !name){
+    clearOutput('Please choose Data Type, Theme, Group, and Dataset.');
+    return;
+  }
+
+  var dates = validateDates();
+  if (dates.error){ clearOutput(dates.error); return; }
+  var region = getRegionFromUI();
+  if (!region){ clearOutput('Please select a Country/District first.'); return; }
+
+  var countryVal  = primarySelect.getValue() || '';
+  var districtVal = secondarySelect.getValue() || 'All';
+  var startStr = startDateBox.getValue();
+  var endStr   = endDateBox.getValue();
+
+  resolveDataset(theme, group, name, function(err, ds){
+    if (err){ clearOutput(err); return; }
+
+    if (ds.type === 'fc'){
+      clearOutput('FeatureCollection has no image count to export.');
+      return;
+    }
+    if (ds.type === 'image'){
+      // Simple “count=1” lines
+      var linesSingle = ee.List([
+        ee.String('Dataset:\t').cat(ds.id),
+        ee.String('Type:\timage'),
+        ee.String('Country:\t').cat(countryVal),
+        ee.String('District:\t').cat(districtVal),
+        ee.String('Start date:\t').cat(startStr),
+        ee.String('End date:\t').cat(endStr),
+        ee.String(''),
+        ee.String('Total images:\t1')
+      ]);
+      var urlSingle = makeBrowserCsvLinkFromLines(linesSingle);  // format:'csv'
+      outputPanel.clear();
+      outputPanel.add(ui.Label('Download count CSV (text)', null, urlSingle));
+      outputPanel.add(ui.Label('This is an immediate browser download (no Drive).'));
+      return;
+    }
+
+    var col = ee.ImageCollection(ds.id).filterDate(dates.start, dates.endExclusive).filterBounds(region);
+    var meta = { id: ds.id, type: ds.type, country: countryVal, district: districtVal, start: startStr, end: endStr };
+    var lines = buildCountTextLines(col, meta);
+    var url = makeBrowserCsvLinkFromLines(lines);  // format:'csv'
+    outputPanel.clear();
+    outputPanel.add(ui.Label('Download count CSV (text)', null, url));
+    outputPanel.add(ui.Label('This is an immediate browser download (no Drive).'));
+  });
+});
+
+/***************
+ * KICK OFF    *
+ ***************/
+populateCountries();
+dataTypeSelect.setValue('Raster (Image/ImageCollection)', false);
+handleDataTypeChange();
+
+/****************************************************
+ * Helper to get the currently selected ee.Image    *
+ ****************************************************/
+function getSelectedImage(cb){
+  var theme = themeSelect.getValue();
+  var group = groupSelect.getValue();
+  var name  = datasetSelect.getValue();
+  if (!theme || !group || !name){
+    cb('Please choose Data Type, Theme, Group, and Dataset.', null, null);
+    return;
+  }
+
+  var dates = validateDates();
+  if (dates.error){ cb(dates.error, null, null); return; }
+  var region = getRegionFromUI();
+  if (!region){ cb('Please select a Country/District first.', null, null); return; }
+
+  resolveDataset(theme, group, name, function(err, ds){
+    if (err){ cb(err, null, null); return; }
+
+    if (ds.type === 'fc'){
+      cb('Selected dataset is a FeatureCollection; it has no bands.', null, ds);
+      return;
+    }
+
+    if (ds.type === 'image'){
+      cb(null, ee.Image(ds.id), ds);
+      return;
+    }
+
+    var col = ee.ImageCollection(ds.id)
+      .filterDate(dates.start, dates.endExclusive)
+      .filterBounds(region);
+
+    col.size().evaluate(function(n){
+      if (!n || n === 0){
+        cb('No images found for the selected date range and region.', null, ds);
+        return;
+      }
+      var first = ee.Image(col.first());
+      cb(null, first, ds);
+    }, function(err2){
+      cb('Failed to query collection size: ' + err2, null, ds);
+    });
+  });
+}
