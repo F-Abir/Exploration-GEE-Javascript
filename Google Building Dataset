@@ -1,0 +1,33 @@
+// ROI: Narayanganj (GAUL level 2, Bangladesh)
+var roi = ee.FeatureCollection('FAO/GAUL/2015/level2')
+  .filter(ee.Filter.eq('ADM0_NAME', 'Bangladesh'))
+  .filter(ee.Filter.inList('ADM2_NAME', ['Narayanganj']))
+  .geometry();
+
+// Open Buildings v3
+var buildings = ee.FeatureCollection('GOOGLE/Research/open-buildings/v3/polygons');
+
+// Clip buildings to ROI (via geometry intersection)
+var clipped = buildings.filterBounds(roi).map(function (f) {
+  return f.setGeometry(f.geometry().intersection(roi, ee.ErrorMargin(1)));
+});
+
+// Count
+print('Number of buildings in ROI:', clipped.size());
+
+// Table schema
+var first = ee.Feature(clipped.first());
+print('Schema — property names:', first.propertyNames());
+print('Schema — example types:',
+  ee.Dictionary(first.toDictionary())
+    .map(function(k, v) { return ee.Algorithms.ObjectType(v); })
+);
+
+// First 10 rows
+print('First 10 rows:', clipped.limit(10));
+
+// Map
+Map.centerObject(roi, 10);
+Map.addLayer(roi, {color: 'black'}, 'ROI — Narayanganj');
+Map.addLayer(clipped, {color: 'orange', fillColor: '00000000', width: 1},
+             'Open Buildings (clipped, orange)');
