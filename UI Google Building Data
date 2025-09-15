@@ -1,0 +1,350 @@
+// -----------------------------------------------------------------------------
+// Open Buildings v3 - Bangladesh Admin (district + multi-upazila; count/sample/pie)
+// -----------------------------------------------------------------------------
+var ADMIN = ee.FeatureCollection('projects/ee-abirnahraf/assets/Admin');
+var BUILDINGS = ee.FeatureCollection('GOOGLE/Research/open-buildings/v3/polygons');
+
+// -----------------------------------------------------------------------------
+// UI
+// -----------------------------------------------------------------------------
+var map = ui.Map();
+map.setControlVisibility({zoomControl: true, mapTypeControl: true, scaleControl: true});
+
+var side = ui.Panel({style: {width: '440px', padding: '10px'}});
+side.add(ui.Label('Open Buildings – Admin selector', {fontWeight: 'bold', fontSize: '18px'}));
+side.add(ui.Label('Pick District, then multiple Upazilas (or Select all). Trace to selection.'));
+
+var propInfo = ui.Label('Property detection: ...', {margin: '6px 0 8px 0', color: 'gray'});
+side.add(propInfo);
+
+// District row
+var districtRow = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'), style: {margin: '8px 0 0 0'}});
+districtRow.add(ui.Label('District:', {margin: '4px 8px 0 0', width: '120px'}));
+var districtSelect = ui.Select([], 'Loading districts...');
+districtRow.add(districtSelect);
+side.add(districtRow);
+
+// Upazila multi-select
+var upazilaHeader = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'), style: {margin: '8px 0 0 0'}});
+upazilaHeader.add(ui.Label('Upazila(s):', {margin: '4px 8px 0 0', width: '120px'}));
+var upazilaAllCb = ui.Checkbox({label: 'Select all', value: true});
+upazilaHeader.add(upazilaAllCb);
+side.add(upazilaHeader);
+
+var upazilaPanel = ui.Panel({style: {backgroundColor: '#f7f7f7', padding: '6px'}});
+side.add(upazilaPanel);
+
+// Controls
+side.add(ui.Label('Rows to preview (1–20):', {margin: '10px 0 2px 0'}));
+var rowsSlider = ui.Slider({min: 1, max: 20, value: 5, step: 1, style: {stretch: 'horizontal'}});
+side.add(rowsSlider);
+
+var runBtn = ui.Button({label: 'Run clip & count buildings', style: {stretch: 'horizontal', margin: '10px 0 0 0'}});
+var sampleBtn = ui.Button({label: 'Show sample rows from clipped dataset', style: {stretch: 'horizontal', margin: '6px 0 0 0'}});
+var pieBtn = ui.Button({label: 'Show upazila-wise pie chart', style: {stretch: 'horizontal', margin: '6px 0 0 0'}});
+var status = ui.Label('', {margin: '8px 0 0 0', color: 'gray'});
+side.add(runBtn);
+side.add(sampleBtn);
+side.add(pieBtn);
+side.add(status);
+
+// Outputs
+var bldgCountLabel = ui.Label('Clipped buildings: -', {margin: '10px 0 0 0'});
+side.add(bldgCountLabel);
+
+side.add(ui.Label('Preview', {margin: '10px 0 4px 0', fontWeight: 'bold'}));
+var tablePanel = ui.Panel({style: {height: '260px', backgroundColor: '#f7f7f7', padding: '6px'}});
+side.add(tablePanel);
+
+side.add(ui.Label('Chart', {margin: '10px 0 4px 0', fontWeight: 'bold'}));
+var chartPanel = ui.Panel();
+side.add(chartPanel);
+
+// Layout
+ui.root.widgets().reset([]);
+ui.root.widgets().add(ui.SplitPanel(side, map, 'horizontal', false));
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+function renderTable(featuresList, columns) {
+  var container = ui.Panel();
+  var header = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')});
+  header.add(ui.Label('#', {fontWeight: 'bold', width: '24px'}));
+  columns.forEach(function(c) {
+    header.add(ui.Label(String(c), {fontWeight: 'bold', margin: '0 8px 0 0', width: '160px'}));
+  });
+  container.add(header);
+
+  featuresList.forEach(function(f, idx) {
+    var row = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')});
+    row.add(ui.Label(String(idx + 1), {width: '24px'}));
+    columns.forEach(function(c) {
+      var v = (f.properties && f.properties.hasOwnProperty(c)) ? f.properties[c] : '';
+      if (v && typeof v === 'object') v = JSON.stringify(v);
+      row.add(ui.Label(String(v), {margin: '0 8px 0 0', width: '160px'}));
+    });
+    container.add(row);
+  });
+  return container;
+}
+
+function styleBoundary(geom) {
+  return ee.FeatureCollection(geom).style({color: 'black', fillColor: '00000000', width: 2});
+}
+
+var roiLayer = null;
+var bldgLayer = null;
+function showRoi(roi, label) {
+  map.layers().reset([]);
+  roiLayer = ui.Map.Layer(styleBoundary(roi), {}, 'ROI - ' + label);
+  map.add(roiLayer);
+  map.centerObject(roi, 8);
+}
+
+function chooseColumns(fc, callback) {
+  var first = ee.Feature(fc.first());
+  first.propertyNames().sort().evaluate(function(names) {
+    var preferred = ['uid','area_in_m2','area','confidence','score','plus_code','source','longitude','latitude'];
+    var cols = preferred.filter(function(p){ return names && names.indexOf(p) !== -1; });
+    if (!cols.length && names && names.length) cols = names.slice(0, Math.min(10, names.length));
+    callback(cols || []);
+  });
+}
+
+function renderPreview(fc, cols) {
+  var n = rowsSlider.getValue();
+  var list = fc.limit(n).toList(n);
+  list.evaluate(function(items) {
+    tablePanel.clear();
+    if (!items || !items.length) {
+      tablePanel.add(ui.Label('No rows to display.'));
+      return;
+    }
+    tablePanel.add(renderTable(items, cols));
+  });
+}
+
+// -----------------------------------------------------------------------------
+// Property detection + cascading selects (with multi-upazila)
+// -----------------------------------------------------------------------------
+var FALLBACK_DISTRICT = 'district';
+var FALLBACK_UPAZILA  = 'upazila';
+
+var DISTRICT_PROP = null;
+var UPAZILA_PROP  = null;
+
+function detectPropertiesAndInit() {
+  ADMIN.first().propertyNames().evaluate(function(names) {
+    names = names || [];
+    var lower = names.map(function(n){ return (n || '').toLowerCase(); });
+    function pick(cands) {
+      for (var i = 0; i < cands.length; i++) {
+        var idx = lower.indexOf(cands[i].toLowerCase());
+        if (idx !== -1) return names[idx];
+      }
+      return null;
+    }
+    DISTRICT_PROP = pick(['district','dist','dist_name','adm2','adm2_name','adm2_en','zilla','zila']) || FALLBACK_DISTRICT;
+    UPAZILA_PROP  = pick(['upazila','upzila','upozilla','sub_district','thana','adm3','adm3_name','adm3_en']) || FALLBACK_UPAZILA;
+
+    propInfo.setValue('Property detection → district: "' + DISTRICT_PROP + '", upazila: "' + UPAZILA_PROP + '"');
+    buildDistrictSelect();
+  });
+}
+
+function buildDistrictSelect() {
+  ADMIN.aggregate_array(DISTRICT_PROP).distinct().sort().evaluate(function(dlist) {
+    districtRow.remove(districtSelect);
+    if (!dlist || !dlist.length) {
+      districtSelect = ui.Select([], 'No districts found');
+      districtRow.add(districtSelect);
+      return;
+    }
+    var def = dlist[0];
+    districtSelect = ui.Select(dlist, 'Select district', def);
+    districtRow.add(districtSelect);
+
+    populateUpazilas(def);
+    districtSelect.onChange(function(d){ populateUpazilas(d); traceToSelection(); });
+  });
+}
+
+var upazilaCheckboxes = [];
+function populateUpazilas(districtName) {
+  var upList = ADMIN.filter(ee.Filter.eq(DISTRICT_PROP, districtName))
+                    .aggregate_array(UPAZILA_PROP).distinct().sort();
+
+  upList.evaluate(function(ulist) {
+    upazilaPanel.clear();
+    upazilaCheckboxes = [];
+
+    if (!ulist || !ulist.length) {
+      upazilaPanel.add(ui.Label('No upazilas for selected district'));
+      return;
+    }
+
+    ulist.forEach(function(name) {
+      var cb = ui.Checkbox({label: String(name), value: false});
+      cb.onChange(function() {
+        var anySelected = upazilaCheckboxes.some(function(c){ return c.getValue(); });
+        upazilaAllCb.setValue(!anySelected);
+        traceToSelection();
+      });
+      upazilaCheckboxes.push(cb);
+      upazilaPanel.add(cb);
+    });
+
+    upazilaAllCb.setValue(true);  // default to all
+    traceToSelection();
+  });
+}
+
+// Return null for "all"
+function selectedUpazilaNames() {
+  if (upazilaAllCb.getValue()) return null;
+  var sel = [];
+  upazilaCheckboxes.forEach(function(cb) {
+    if (cb.getValue()) sel.push(cb.getLabel());
+  });
+  return sel.length ? sel : null;
+}
+
+upazilaAllCb.onChange(function(){ traceToSelection(); });
+
+function currentRoiFc() {
+  var dist = districtSelect.getValue();
+  var sel = selectedUpazilaNames();
+  var fc = ADMIN.filter(ee.Filter.eq(DISTRICT_PROP, dist));
+  if (sel) fc = fc.filter(ee.Filter.inList(UPAZILA_PROP, ee.List(sel)));
+  return fc;
+}
+
+function traceToSelection() {
+  var fc = currentRoiFc();
+  var roi = fc.geometry();
+
+  var label = districtSelect.getValue();
+  var sel = selectedUpazilaNames();
+  if (sel && sel.length) label += ' → ' + sel.join(', ');
+  else label += ' → All upazilas';
+
+  showRoi(roi, label);
+}
+
+// -----------------------------------------------------------------------------
+// Actions
+// -----------------------------------------------------------------------------
+var lastClipped = null;
+
+function runClipAndCount() {
+  status.setValue('Clipping and counting...');
+  runBtn.setDisabled(true);
+  bldgCountLabel.setValue('Clipped buildings: ...');
+  tablePanel.clear();
+  chartPanel.clear();
+
+  var roiFc = currentRoiFc();
+  var roi = roiFc.geometry();
+
+  var clipped = BUILDINGS.filterBounds(roi).map(function (f) {
+    return f.setGeometry(f.geometry().intersection(roi, ee.ErrorMargin(1)));
+  });
+  lastClipped = clipped;
+
+  var lbl = districtSelect.getValue();
+  var sel = selectedUpazilaNames();
+  lbl += sel && sel.length ? (' → ' + sel.join(', ')) : ' → All upazilas';
+  showRoi(roi, lbl);
+  bldgLayer = ui.Map.Layer(clipped.style({color: 'orange', fillColor: '00000000', width: 1}), {}, 'Open Buildings (clipped)');
+  map.add(bldgLayer);
+
+  clipped.size().evaluate(function(n) {
+    bldgCountLabel.setValue('Clipped buildings: ' + (n ? n.toLocaleString() : '0'));
+    status.setValue('Done.');
+    runBtn.setDisabled(false);
+  });
+}
+
+function showSampleRows() {
+  tablePanel.clear();
+  chartPanel.clear();
+  if (!lastClipped) {
+    tablePanel.add(ui.Label('Run “Clip & count” first.'));
+    return;
+  }
+  status.setValue('Preparing sample rows...');
+  sampleBtn.setDisabled(true);
+
+  chooseColumns(lastClipped, function(cols) {
+    renderPreview(lastClipped, cols);
+    status.setValue('Done.');
+    sampleBtn.setDisabled(false);
+  });
+}
+
+function showUpazilaPie() {
+  chartPanel.clear();
+  tablePanel.clear(); // pie-only view
+  status.setValue('Building upazila-wise pie chart...');
+  pieBtn.setDisabled(true);
+
+  var roiFc = currentRoiFc();         // selected upazilas (or all)
+  var roi = roiFc.geometry();
+  var buildings = lastClipped ? lastClipped : BUILDINGS.filterBounds(roi);
+
+  // Count buildings per upazila
+  var countsFc = roiFc.map(function(f) {
+    var geom = f.geometry();
+    var name = ee.String(f.get(UPAZILA_PROP));
+    var count = buildings.filterBounds(geom).size();
+    return ee.Feature(null, {upazila: name, count: count});
+  });
+
+  // Sort by count desc for nicer chart order
+  var sorted = countsFc.sort('count', false);
+  var labels = sorted.aggregate_array('upazila');
+  var counts = sorted.aggregate_array('count');
+
+  // Show chart (only if there are buildings)
+  ee.Number(ee.List(counts).reduce(ee.Reducer.sum())).evaluate(function(total) {
+    if (!total || total === 0) {
+      chartPanel.add(ui.Label('No buildings found for the selection.'));
+      status.setValue('Done.');
+      pieBtn.setDisabled(false);
+      return;
+    }
+
+    var chart = ui.Chart.array.values(ee.Array(counts), 0, labels)
+      .setChartType('PieChart')
+      .setOptions({
+        title: 'Upazila-wise building counts',
+        legend: { position: 'right' },
+        pieHole: 0.3
+      });
+    chartPanel.add(chart);
+    status.setValue('Done.');
+    pieBtn.setDisabled(false);
+  });
+
+  // Keep map traced to selection
+  var lbl = districtSelect.getValue();
+  var sel = selectedUpazilaNames();
+  lbl += sel && sel.length ? (' → ' + sel.join(', ')) : ' → All upazilas';
+  showRoi(roi, lbl);
+  if (lastClipped) {
+    bldgLayer = ui.Map.Layer(lastClipped.style({color: 'orange', fillColor: '00000000', width: 1}), {}, 'Open Buildings (clipped)');
+    map.add(bldgLayer);
+  }
+}
+
+// Slider: only affects preview when “Show sample rows” is clicked
+rowsSlider.onChange(function(){});
+
+// Wire up
+runBtn.onClick(runClipAndCount);
+sampleBtn.onClick(showSampleRows);
+pieBtn.onClick(showUpazilaPie);
+
+// Init
+detectPropertiesAndInit();
