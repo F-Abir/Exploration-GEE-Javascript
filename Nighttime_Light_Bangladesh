@@ -1,0 +1,309 @@
+/**** Methodological Objective
+  AOI: Bangladesh only (FAO GAUL ADM0).
+  Data: NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG (monthly radiance, 'avg_rad').
+  Outputs:
+    (1) Annual mean radiance per year (Bangladesh-only, optional land mask).
+    (2) Otsu threshold per-year from Bangladesh pixels only (no Array.cumsum).
+    (3) Time-series chart of mean radiance (intensity).
+    (4) GIF animation with embedded year text; outline is subtle; raster is vibrant with global robust stretch.
+  Notes: No Drive export. Memory-safe reducers with bestEffort/tileScale/maxPixels.
+****/
+
+/**** 0) PARAMETERS (adjust here if needed) ****/
+var SCALE_STATS    = 500;     // reducer/chart scale (m). 500 m is safer nationwide than 300 m
+var TILE_SCALE     = 4;       // increase if reducers hit memory
+var MAX_PIXELS     = 1e13;    // generous guard for reducers
+var APPLY_LANDMASK = true;    // mask likely water pixels (ships/fleets) to stabilize Otsu
+
+// Visualization tuning (subtle outline, vibrant raster)
+var OUTLINE_COLOR = '#BDBDBD';    // soft gray outline for static map
+var OUTLINE_WIDTH = 1;            // thin border
+var OUTLINE_DIM_FACTOR = 0.35;    // further dim outline inside GIF frames (0..1)
+var GAMMA = 0.8;                  // we will pre-apply gamma: scaled^(1/GAMMA)
+var PALETTE_VIB = [               // vibrant, perceptually ordered palette
+  '000004','1b0c41','4a0c6b','781c6d','a52c60',
+  'cf4446','ed6925','fb9f06','f7d13d','fcffa4'
+];
+
+var FPS        = 2;               // animation speed (frames per second)
+var TEXT_SCALE = 1000;            // text render scale (bigger number = coarser glyphs)
+var TEXT_POINT = ee.Geometry.Point([88.2, 25.8]); // label at NW Bangladesh, away from bright cores
+
+/**** 1) AOI: FAO GAUL ADM0 – Bangladesh ****/
+var gaul0 = ee.FeatureCollection('FAO/GAUL/2015/level0');
+var bdFC  = gaul0.filter(ee.Filter.eq('ADM0_NAME', 'Bangladesh'));
+var BD    = bdFC.geometry();
+
+/**** 2) VIIRS monthly VCMCFG collection ****/
+var viirsMonthly = ee.ImageCollection('NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG')
+  .filterBounds(BD)
+  .select('avg_rad');
+
+var minDate = ee.Date(viirsMonthly.aggregate_min('system:time_start'));
+var maxDate = ee.Date(viirsMonthly.aggregate_max('system:time_start'));
+print('Data temporal extent:', minDate, maxDate);
+
+// Distinct available years from the collection
+var years = ee.List(
+  viirsMonthly.aggregate_array('system:time_start')
+    .map(function(t){ return ee.Date(t).get('year'); })
+).distinct().sort();
+print('Available years (Bangladesh):', years);
+
+/**** 3) Optional land mask to suppress over-water lights (fishing fleets/ships) ****/
+var landMask = ee.Image(1);
+if (APPLY_LANDMASK) {
+  // JRC Global Surface Water occurrence: label "water" if occurrence >10% (conservative)
+  var gsw = ee.Image('JRC/GSW1_3/GlobalSurfaceWater').select('occurrence');
+  var water = gsw.gt(10);
+  landMask = water.not();  // land = not water
+}
+
+/**** 4) Otsu threshold helper (Bangladesh-only, per-year) – list/iterate, no Array.cumsum ****/
+function otsuThreshold(img, region, scale) {
+  // Build histogram of the single band over Bangladesh
+  var hDict = img.reduceRegion({
+    reducer: ee.Reducer.histogram({maxBuckets: 255, minBucketWidth: 0.05}),
+    geometry: region, scale: scale, bestEffort: true,
+    tileScale: TILE_SCALE, maxPixels: MAX_PIXELS
+  });
+
+  var band   = ee.String(img.bandNames().get(0));            // 'avg_rad'
+  var hist   = ee.Dictionary(hDict.get(band));
+  var counts = ee.Array(ee.List(hist.get('histogram')));     // bin counts
+  var means  = ee.Array(ee.List(hist.get('bucketMeans')));   // bin centers
+  var nBins  = counts.length().get([0]);
+
+  var total  = counts.reduce(ee.Reducer.sum(), [0]).get([0]);
+  var sumAll = counts.multiply(means).reduce(ee.Reducer.sum(), [0]).get([0]);
+  var meanAll= ee.Number(sumAll).divide(total);
+
+  // Iterate over bin edges to compute between-class variance; track maximum
+  var idxs = ee.List.sequence(1, nBins);
+  var init = ee.Dictionary({max: ee.Number(-1), idx: ee.Number(0)});
+  var out = idxs.iterate(function(i, prev){
+    prev = ee.Dictionary(prev); i = ee.Number(i);
+
+    var cL = counts.slice(0, 0, i).reduce(ee.Reducer.sum(), [0]).get([0]);              // cumulative count
+    var sL = counts.slice(0, 0, i).multiply(means.slice(0, 0, i))                       // cumulative sum
+               .reduce(ee.Reducer.sum(), [0]).get([0]);
+
+    cL = ee.Number(cL);
+    var w0 = cL.divide(total), w1 = ee.Number(1).subtract(w0);
+
+    var between = ee.Algorithms.If(
+      w0.eq(0).or(w1.eq(0)),
+      0,
+      (function(){
+        var m0 = ee.Number(sL).divide(cL);
+        return w0.multiply(w1).multiply(m0.subtract(meanAll).pow(2));
+      })()
+    );
+
+    var maxPrev = ee.Number(prev.get('max'));
+    return ee.Algorithms.If(
+      ee.Number(between).gt(maxPrev),
+      ee.Dictionary({max: ee.Number(between), idx: i.subtract(1)}),
+      prev
+    );
+  }, init);
+
+  var bestIdx = ee.Number(ee.Dictionary(out).get('idx'));
+  return ee.Number(ee.List(hist.get('bucketMeans')).get(bestIdx));
+}
+
+/**** 5) Annual image collection and per-year stats (Bangladesh-only) ****/
+var annualIC = ee.ImageCollection.fromImages(
+  years.map(function(y){
+    y = ee.Number(y);
+    var img = viirsMonthly
+      .filter(ee.Filter.calendarRange(y, y, 'year'))
+      .mean()                        // Annual MEAN composite (sensitive to spikes; see alternatives below)
+      .rename('avg_rad')
+      .clip(BD);
+    img = APPLY_LANDMASK ? img.updateMask(landMask) : img;
+    return img.set('year', y);
+  })
+);
+print('Annual means (sample):', annualIC.limit(3));
+
+var pixelArea_km2 = ee.Image.pixelArea().divide(1e6);
+
+var perYear = ee.FeatureCollection(years.map(function(y){
+  y = ee.Number(y);
+  var img = ee.Image(annualIC.filter(ee.Filter.eq('year', y)).first());
+
+  // Otsu on Bangladesh-only pixels, this year
+  var thr = otsuThreshold(img, BD, SCALE_STATS);
+
+  // Radiance summary stats (Bangladesh)
+  var stats = img.reduceRegion({
+    reducer: ee.Reducer.mean()
+      .combine({reducer2: ee.Reducer.median(), sharedInputs: true})
+      .combine({reducer2: ee.Reducer.percentile([90]), sharedInputs: true})
+      .combine({reducer2: ee.Reducer.minMax(), sharedInputs: true}),
+    geometry: BD, scale: SCALE_STATS, bestEffort: true,
+    tileScale: TILE_SCALE, maxPixels: MAX_PIXELS
+  });
+
+  // Lit area (km²) using this year's Otsu threshold
+  var lit = img.gt(thr).selfMask();
+  var areaLit = pixelArea_km2.updateMask(lit).reduceRegion({
+    reducer: ee.Reducer.sum(), geometry: BD, scale: SCALE_STATS,
+    bestEffort: true, tileScale: TILE_SCALE, maxPixels: MAX_PIXELS
+  }).get('area');
+
+  return ee.Feature(null, {
+    'year': y,
+    'thr_otsu': thr,
+    'mean_rad': stats.get('avg_rad_mean'),
+    'median_rad': stats.get('avg_rad_median'),
+    'p90_rad': stats.get('avg_rad_p90'),
+    'min_rad': stats.get('avg_rad_min'),
+    'max_rad': stats.get('avg_rad_max'),
+    'area_lit_km2_otsu': areaLit
+  });
+}));
+print('Bangladesh annual table (Otsu + stats):', perYear);
+
+/**** 6) Time-series chart of mean radiance (intensity) ****/
+var chart = ui.Chart.feature.byFeature(perYear.sort('year'), 'year', 'mean_rad')
+  .setChartType('LineChart')
+  .setOptions({
+    title: 'Bangladesh VIIRS Annual Mean Radiance (VCMCFG)\nOtsu per-year computed on Bangladesh pixels',
+    hAxis: {title: 'Year'},
+    vAxis: {title: 'Mean radiance (nW·cm⁻²·sr⁻¹)'},
+    lineWidth: 2, pointSize: 4, legend: {position: 'none'}
+  });
+print(chart);
+
+/**** 7) Robust global stretch (p2–p98 across years) with SAFE getters ****/
+function getPercentileSafe(img, p, region, scale) {
+  // Combine percentile with min/max so we always have a fallback value
+  var red = ee.Reducer.percentile([p]).combine({
+    reducer2: ee.Reducer.minMax(), sharedInputs: true
+  });
+  var d = img.reduceRegion({
+    reducer: red, geometry: region, scale: scale,
+    bestEffort: true, tileScale: TILE_SCALE, maxPixels: MAX_PIXELS
+  });
+
+  var band  = ee.String(img.bandNames().get(0));             // 'avg_rad'
+  var keyP  = band.cat('_p').cat(ee.Number(p).format());     // e.g., 'avg_rad_p2'
+  var keyMin= band.cat('_min');
+  var keyMax= band.cat('_max');
+
+  d = ee.Dictionary(d);
+  var val = ee.Algorithms.If(
+    d.contains(keyP),
+    d.get(keyP),
+    ee.Algorithms.If(ee.Number(p).lte(50), d.get(keyMin), d.get(keyMax))
+  );
+  return ee.Number(val);
+}
+
+// Derive global lower/upper stretch across ALL years (promotes inter-year comparability)
+var p2List = years.map(function(y){
+  var im = ee.Image(annualIC.filter(ee.Filter.eq('year', ee.Number(y))).first());
+  return getPercentileSafe(im, 2, BD, SCALE_STATS);
+});
+var p98List = years.map(function(y){
+  var im = ee.Image(annualIC.filter(ee.Filter.eq('year', ee.Number(y))).first());
+  return getPercentileSafe(im, 98, BD, SCALE_STATS);
+});
+var globalMin = ee.Number(ee.List(p2List).reduce(ee.Reducer.min()));
+var globalMax = ee.Number(ee.List(p98List).reduce(ee.Reducer.max()));
+
+// Guard against degenerate case where min==max
+var EPS = 1e-6;
+globalMax = ee.Number(ee.Algorithms.If(globalMax.subtract(globalMin).abs().lt(EPS),
+                                        globalMin.add(1), globalMax));
+print('Global stretch (safe p2..p98 across years):', globalMin, globalMax);
+
+/**** 7b) Visualization helper with PRE-APPLIED gamma (no gamma in visualize) ****/
+function visualizeVibrant(img){
+  // Scale to 0..1 using globalMin/globalMax
+  var scaled = img.clamp(globalMin, globalMax)
+                 .subtract(globalMin)
+                 .divide(globalMax.subtract(globalMin));
+  // Pre-apply gamma correction: output = scaled^(1/gamma)
+  var invGamma = ee.Number(1.0).divide(GAMMA);
+  var adj = ee.Algorithms.If(
+    ee.Number(GAMMA).neq(1),
+    ee.Image(scaled).pow(invGamma),
+    scaled
+  );
+  // Visualize with palette only (no gamma option here)
+  return ee.Image(adj).visualize({min: 0, max: 1, palette: PALETTE_VIB});
+}
+
+/**** 8) Map preview: vibrant last year + subtle outline ****/
+var lastYear = ee.Number(years.get(-1));
+var lastImg  = ee.Image(annualIC.filter(ee.Filter.eq('year', lastYear)).first());
+var lastRGB  = visualizeVibrant(lastImg);
+Map.centerObject(BD, 7);
+Map.addLayer(lastRGB, {}, 'VIIRS annual mean (vibrant, last year)');
+Map.addLayer(ee.Image().byte().paint(bdFC, 1, OUTLINE_WIDTH),
+             {palette:[OUTLINE_COLOR]}, 'Bangladesh outline (subtle)');
+
+/**** 9) Animation: year-embedded frames, subtle/dimmed outline ****/
+var text = require('users/gena/packages:text');  // If this fails on first run, re-run the script
+
+// Outline raster for frames (dimmed)
+var outlineRGB = ee.Image().byte().paint(bdFC, 1, OUTLINE_WIDTH)
+                  .visualize({palette: ['FFFFFF']})
+                  .multiply(OUTLINE_DIM_FACTOR)    // dim further inside frames
+                  .toByte();
+
+var videoIC = ee.ImageCollection(years.map(function(y){
+  y = ee.Number(y);
+  var img = ee.Image(annualIC.filter(ee.Filter.eq('year', y)).first());
+  var rgb = visualizeVibrant(img);
+
+  // Positional-args signature: draw(text, position, scale, styleOptions)
+  var label = text.draw(
+    y.format(), TEXT_POINT, TEXT_SCALE,
+    { textColor: 'white', outlineColor: '000000', outlineWidth: 2 }
+  );
+
+  return ee.ImageCollection([rgb, outlineRGB, label]).mosaic().set('year', y);
+}));
+
+var gifParams = { region: BD, dimensions: 768, framesPerSecond: FPS, crs: 'EPSG:4326' };
+print('Animation (click to open):', ui.Thumbnail(videoIC, gifParams));
+
+// Optional: also display last frame on map
+Map.addLayer(ee.Image(videoIC.filter(ee.Filter.eq('year', lastYear)).first()), {}, 'Animation last frame');
+
+/**** 10) Alternative methodological paths (choose when/why)
+  Thresholding:
+    (A) Otsu (chosen): Year-specific, objective, Bangladesh-only histogram. Best for inter-year comparability.
+    (B) Percentile threshold (e.g., p85): Use if distributions are skewed or you want stable "lit share" across years.
+    (C) Fixed threshold (e.g., 3 nW): Use to replicate legacy studies; ALWAYS run sensitivity checks (±1 nW).
+
+  Annual Composite:
+    (A) MEAN (chosen): Reflects total luminous intensity; but sensitive to festival spikes/outliers.
+    (B) MEDIAN: Robust to spikes; recommended as a sensitivity analysis.
+    (C) TRIMMED MEAN (e.g., 5–95%): Balance between mean and median; helps when outliers are present.
+
+  Visualization stretch:
+    (A) GLOBAL p2–p98 across years (chosen): Keeps inter-year comparability and good contrast.
+    (B) PER-YEAR p2–p98: Maximizes per-frame pop but hurts inter-year comparability.
+    (C) LOG/ASINH stretch: Enhances low radiance (peri-urban electrification) while compressing bright tails.
+****/
+
+/**** 11) Memory-limit notes (where "Too many pixels" may arise)
+  - reduceRegion over national AOI at fine scale: mitigated via scale=500 m, bestEffort:true, tileScale=4, maxPixels=1e13.
+  - If still failing: increase SCALE_STATS to 1000 m; or compute stats per-tile and aggregate; or reduce to ADM2 iteratively.
+  - The animation uses visualize() → 3-band 8-bit frames; keep to avoid large memory footprint.
+****/
+
+/**** 12) PRINT STATEMENTS in this script (for audit/reproducibility)
+  print('Data temporal extent:', minDate, maxDate);
+  print('Available years (Bangladesh):', years);
+  print('Annual means (sample):', annualIC.limit(3));
+  print('Bangladesh annual table (Otsu + stats):', perYear);
+  print('Global stretch (safe p2..p98 across years):', globalMin, globalMax);
+  print(chart);
+  print('Animation (click to open):', ui.Thumbnail(videoIC, gifParams));
+****/
