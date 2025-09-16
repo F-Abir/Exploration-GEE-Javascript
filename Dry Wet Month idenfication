@@ -1,0 +1,107 @@
+// ROI (Sylhet, Bangladesh)
+var roi = ee.FeatureCollection('FAO/GAUL/2015/level2')
+  .filter(ee.Filter.eq('ADM0_NAME', 'Bangladesh'))
+  .filter(ee.Filter.inList('ADM2_NAME', ['Sylhet']))
+  .geometry();
+Map.addLayer(roi, {color: 'red'}, 'ROI');
+Map.centerObject(roi);
+
+// Time range (inclusive)
+var time_start = '2010-01-01';
+var time_end = '2020-12-31';
+var start = ee.Date(time_start);
+var end = ee.Date(time_end);
+
+// CHIRPS daily collection filtered to the period
+var pr = ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
+  .filterDate(start, end.advance(1, 'day')); // ensure end inclusive
+
+// build a sequence of months from start to end (inclusive)
+var monthsCount = ee.Number(end.difference(start, 'month')).add(1);
+var months = ee.List.sequence(0, monthsCount.subtract(1));
+
+// Create monthly FeatureCollection with pr_mean (one property)
+var monthlyFC = ee.FeatureCollection(
+  months.map(function(m) {
+    m = ee.Number(m);
+    var s = start.advance(m, 'month');
+    var e = s.advance(1, 'month');
+
+    // monthly mean of daily precipitation (mm/day)
+    var monthlyMeanImg = pr.filterDate(s, e).mean();
+
+    // zonal mean over ROI
+    var meanDict = monthlyMeanImg.reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: roi,
+      scale: 5560,
+      maxPixels: 1e13,
+      bestEffort: true
+    });
+
+    var valuesList = meanDict.values();
+    var meanVal = ee.Algorithms.If(valuesList.size(), ee.Number(valuesList.get(0)), null);
+
+    return ee.Feature(null, {
+      'system:time_start': s.millis(),
+      'date': s.format('YYYY-MM'),
+      'pr_mean': meanVal
+    });
+  })
+).filter(ee.Filter.notNull(['pr_mean'])) // drop months where reduction failed
+  .sort('system:time_start');
+
+print('Monthly count:', monthlyFC.size());
+print('Sample (first 10):', monthlyFC.limit(10));
+
+// ---------- Build numeric series from pr_mean ----------
+var nan = ee.Number(0).divide(ee.Number(0)); // numeric NaN
+
+// get ordered lists
+var datesList = monthlyFC.aggregate_array('date');     // x-axis labels
+var prList = monthlyFC.aggregate_array('pr_mean');     // may contain nulls
+
+// Create dry and wet numeric lists (NaN where not dry/wet)
+var dryListNum = prList.map(function(v){
+  v = ee.Algorithms.If(ee.Algorithms.IsEqual(v, null), nan, ee.Number(v));
+  return ee.Algorithms.If(ee.Number(v).lt(0.5), v, nan);
+});
+
+var wetListNum = prList.map(function(v){
+  v = ee.Algorithms.If(ee.Algorithms.IsEqual(v, null), nan, ee.Number(v));
+  return ee.Algorithms.If(ee.Number(v).gt(1), v, nan);
+});
+
+// Debug prints (lengths and small samples)
+print('dates length:', datesList.length());
+print('pr_list length:', prList.length());
+print('dry sample (first 20):', ee.List(dryListNum).slice(0,20));
+print('wet sample (first 20):', ee.List(wetListNum).slice(0,20));
+
+// Build a 2xN ee.Array from the two lists (each row = one series)
+var arr2xN = ee.Array([dryListNum, wetListNum]);
+
+// Instead of calling a non-existent .shape(), print the array object and rely on datesList length:
+print('ee.Array (partial view):', arr2xN);
+
+// ---------- Chart from ee.Array with xLabels ----------
+var chart = ui.Chart.array.values({
+  array: arr2xN,
+  axis: 1,           // read across columns -> each column is a point (two rows = two series)
+  xLabels: datesList
+})
+.setChartType('ColumnChart')
+.setOptions({
+  title: 'Dry (red) and Wet (blue) months — monthly mean precipitation (CHIRPS) over Sylhet',
+  hAxis: {title: 'Month', slantedText: true, slantedTextAngle: 45},
+  vAxis: {title: 'Precipitation (mm/day)'},
+  legend: {position: 'top'},
+  colors: ['#FF0000', '#1E90FF'], // 0 -> dry (orange), 1 -> wet (blue)
+  series: {
+    0: {labelInLegend: 'Dry (pr_mean < 0.5)'},
+    1: {labelInLegend: 'Wet (pr_mean > 1)'}
+  },
+  bar: { groupWidth: '100%' },
+  height: 420,
+});
+print(chart);
