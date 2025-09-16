@@ -1,0 +1,91 @@
+
+//  AOI: Bangladesh (FAO GAUL, ADM0)
+var gaul0 = ee.FeatureCollection('FAO/GAUL/2015/level0');
+var bangladesh = ee.Feature(gaul0.filter(ee.Filter.eq('ADM0_NAME','Bangladesh')).first());
+var roiBD = bangladesh.geometry();
+Map.centerObject(roiBD, 6);
+
+// Load ERA5-DAILY; print band names (raw vs selected)
+var eraRaw = ee.ImageCollection('ECMWF/ERA5/DAILY');
+print('ERA5/DAILY — ALL band names on first image:', eraRaw.first().bandNames());
+
+var eraDaily = eraRaw.select(['u_component_of_wind_10m','v_component_of_wind_10m']);
+print('ERA5/DAILY — SELECTED (u,v) band names:', eraDaily.first().bandNames());
+
+//  Latest-day image & wind speed (m/s)
+var latestDate = ee.Date(eraDaily.aggregate_max('system:time_start'));
+var latestImg  = eraDaily.filterDate(latestDate, latestDate.advance(1,'day')).first();
+
+var windMs = latestImg.expression(
+  'sqrt(u*u + v*v)',
+  {
+    u: latestImg.select('u_component_of_wind_10m'),
+    v: latestImg.select('v_component_of_wind_10m')
+  }
+).rename('wind_ms');
+
+// 4) Percentile stretch + gamma for map visualization
+var statsP = windMs.reduceRegion({
+  reducer: ee.Reducer.percentile([2,98]),
+  geometry: roiBD, scale: 25000, bestEffort: true, maxPixels: 1e13
+});
+var p2  = ee.Number(statsP.get('wind_ms_p2'));
+var p98 = ee.Number(statsP.get('wind_ms_p98'));
+var gammaVal = 0.8;
+
+var norm   = windMs.clamp(p2, p98).unitScale(p2, p98);
+var visImg = norm.pow(1 / gammaVal);
+
+var palette = ['F1F8E9','C5E1A5','9CCC65','66BB6A','43A047','2E7D32','1B5E20'];
+Map.addLayer(
+  visImg.clip(roiBD),
+  {min: 0, max: 1, palette: palette},
+  'ERA5 10 m Wind — Latest (p2–p98 + gamma=0.8)',
+  true
+);
+
+// (Optional) Linear stretch layer for quick comparison
+Map.addLayer(
+  windMs.clip(roiBD),
+  {min: 0, max: 15, palette: palette},
+  'ERA5 10 m Wind — Latest (linear 0–15 m/s)',
+  false
+);
+
+// Descriptive stats (μ, σ, μ±σ, μ±2σ) over Bangladesh (native scale)
+var mom = windMs.reduceRegion({
+  reducer: ee.Reducer.mean().combine(ee.Reducer.stdDev(), '', true),
+  geometry: roiBD, scale: 25000, bestEffort: true, maxPixels: 1e13
+});
+var mu    = ee.Number(mom.get('wind_ms_mean'));
+var sigma = ee.Number(mom.get('wind_ms_stdDev'));
+var m_m1  = mu.subtract(sigma);
+var m_p1  = mu.add(sigma);
+var m_m2  = mu.subtract(sigma.multiply(2));
+var m_p2  = mu.add(sigma.multiply(2));
+
+print('Latest ERA5-DAILY date (UTC):', latestDate.format('YYYY-MM-dd'));
+print('Bangladesh wind speed — mean (μ, m/s):', mu);
+print('Bangladesh wind speed — std dev (σ, m/s):', sigma);
+print('μ ± 1σ (m/s):', ee.String('[').cat(m_m1.format('%.2f')).cat(', ').cat(m_p1.format('%.2f')).cat(']'));
+print('μ ± 2σ (m/s):', ee.String('[').cat(m_m2.format('%.2f')).cat(', ').cat(m_p2.format('%.2f')).cat(']'));
+print('Visualization stretch (m/s): p2 =', p2, '  p98 =', p98);
+
+// Distribution chart (histogram) — p2–p98 clamped range
+var windClamped = windMs.clamp(p2, p98);
+var scaleERA = 25000;       // keep close to native resolution
+
+var histChart = ui.Chart.image.histogram({
+  image: windClamped,
+  region: roiBD,
+  scale: scaleERA,
+  maxBuckets: 50,       // number of bins
+  minBucketWidth: 0.1   // min bin width in m/s (adjust if needed)
+}).setOptions({
+  title: 'Bangladesh — Latest 10 m wind speed distribution (m/s), p2–p98 range',
+  hAxis: {title: 'Wind speed (m/s)'},
+  vAxis: {title: 'Pixel count'},
+  legend: {position: 'none'}
+});
+print(histChart);
+
