@@ -1,0 +1,55 @@
+//  AOI: Bangladesh (FAO GAUL, ADM0)
+var gaul0 = ee.FeatureCollection('FAO/GAUL/2015/level0');
+var bangladesh = ee.Feature(gaul0.filter(ee.Filter.eq('ADM0_NAME','Bangladesh')).first());
+var roiBD = bangladesh.geometry();
+Map.centerObject(roiBD, 6);
+
+var era5 = ee.ImageCollection("ECMWF/ERA5/DAILY")
+.select('u_.*','v_.*')
+.filterDate('2010','2024');
+
+var windspeed = era5.map(function(img){
+  var eq = img.expression('sqrt((u**2)+(v**2))',{
+    'u': img.select('u_.*'), 'v': img.select('v_.*')
+    }).rename('wind_speed');
+    return eq
+    .copyProperties(img, img.propertyNames())
+  });
+  
+print(
+  ui.Chart.image.series(windspeed, roi, ee.Reducer.mean(),
+  27000, 'system:time_start')
+  )
+  
+  
+
+var wind40 = ee.ImageCollection("ECMWF/ERA5/DAILY")
+.filterDate('1980','2020');
+
+var windspeed40 = wind40.map(function(img){
+  var eq = img.expression('sqrt((u**2)+(v**2))',{
+    'u': img.select('u_.*'), 'v': img.select('v_.*')
+    }).rename('wind_speed');
+    return eq
+    .copyProperties(img, img.propertyNames())
+  });
+
+function get_value(img){
+  var date = ee.Date(ee.Image(img).get('system:time_start')).format().slice(0,10);
+  var value = ee.Number(ee.Image(img).reduceRegion({
+    reducer: ee.Reducer.mean(), geometry: roi, scale: 27000
+    }).values().get(0))
+  return [date, value]
+  }
+  
+var size = windspeed40.size();
+var windlist = windspeed40.toList(size).map(get_value);
+
+var wind_feature = ee.FeatureCollection(windlist.map(function(el){
+  el = ee.List(el);
+  return ee.Feature(null, {'date': ee.String(el.get(0)), 'windspeed': ee.String(el.get(1))})
+  }));
+  
+Export.table.toDrive({
+  collection: wind_feature, description: 'windspeed40', fileFormat: 'CSV'
+  })
