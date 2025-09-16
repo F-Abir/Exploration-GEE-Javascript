@@ -1,0 +1,132 @@
+// 1) AOI from FAO GAUL (Level 2 = districts)
+var gaul = ee.FeatureCollection('FAO/GAUL/2015/level2');
+
+// Filter to Bangladesh -> Sylhet (ADM0_NAME, ADM2_NAME are GAUL attributes)
+var roi = gaul.filter(ee.Filter.and(
+  ee.Filter.eq('ADM0_NAME', 'Bangladesh'),
+  ee.Filter.eq('ADM2_NAME', 'Sylhet')
+));
+
+// Center map on Sylhet
+Map.centerObject(roi, 9);
+
+// Load MODIS land cover (IGBP LC_Type1) and visualize
+var lc = ee.ImageCollection("MODIS/061/MCD12Q1")
+  .select('LC_Type1')
+  // .mode() across years to get a modal landcover map (2001-2023)
+  .mode();
+
+// IGBP 1-17 palette & names (from MCD12Q1 documentation)
+var igbpPalette = [
+  '05450a','086a10','54a708','78d203','009900','c6b044','dcd159',
+  'dade48','fbff13','b6ff05','27ff87','c24f44','a5a5a5','ff6d4c',
+  '69fff8','f9ffa4','1c0dff'
+];
+
+var igbpNames = [
+  '1 Evergreen Needleleaf Forests',
+  '2 Evergreen Broadleaf Forests',
+  '3 Deciduous Needleleaf Forests',
+  '4 Deciduous Broadleaf Forests',
+  '5 Mixed Forests',
+  '6 Closed Shrublands',
+  '7 Open Shrublands',
+  '8 Woody Savannas',
+  '9 Savannas',
+  '10 Grasslands',
+  '11 Permanent Wetlands',
+  '12 Croplands',
+  '13 Urban and Built-up Lands',
+  '14 Cropland/Natural Vegetation Mosaic',
+  '15 Permanent Snow and Ice',
+  '16 Barren or Sparsely Vegetated',
+  '17 Water Bodies'
+];
+
+// Add the modal landcover to the map (clipped to Sylhet)
+var lcModal = lc.clip(roi);
+Map.addLayer(lcModal, {min:1, max:17, palette: igbpPalette}, 'IGBP LC (mode)', false);
+
+// create masks/vectors for water (class 17) and urban (class 13)
+
+// Water: class 17
+var waterThr = lcModal.eq(17);
+var waterMask = waterThr.updateMask(waterThr);
+Map.addLayer(waterMask.clip(roi), {}, 'Water mask', false);
+
+// Urban: class 13
+var urbanThr = lcModal.eq(13);
+var urbanMask = urbanThr.updateMask(urbanThr);
+Map.addLayer(urbanMask.clip(roi), {}, 'Urban mask', false);
+
+// Reduce to vectors (warning: reduceToVectors can be heavy — see notes below)
+var waterVectors = waterMask.reduceToVectors({
+  geometry: roi,
+  scale: 500,
+  geometryType: 'polygon',
+  eightConnected: false,
+  maxPixels: 1e13
+}).union(1);
+
+var urbanVectors = urbanMask.reduceToVectors({
+  geometry: roi,
+  scale: 500,
+  geometryType: 'polygon',
+  eightConnected: false,
+  maxPixels: 1e13
+}).union(1);
+
+// Add vectors to map (toggle off by default)
+Map.addLayer(waterVectors, {color: '0000FF'}, 'Water polygons', false);
+Map.addLayer(urbanVectors, {color: '888888'}, 'Urban polygons', false);
+
+// LST time series (MOD11A2)
+var temp = ee.ImageCollection("MODIS/061/MOD11A2")
+  .select('LST_Day_1km')
+  // align the period you want. using 2001-01-01 to 2024-12-31
+  .filterDate('2001-01-01', '2024-12-31')
+  // scale from MODIS (factor 0.02) and convert to Celsius
+  .map(function(img){
+    return img.multiply(0.02).subtract(273.15)
+      .copyProperties(img, img.propertyNames());
+  });
+
+//  Charts: mean LST over time for water and for urban within Sylhet
+// Note: using the vector FC as the region argument. If the FC is empty,
+// the chart will be empty — inspect masks visually to verify coverage.
+
+// Water time series chart
+var waterChart = ui.Chart.image.series({
+  imageCollection: temp,
+  region: waterVectors,
+  reducer: ee.Reducer.mean(),
+  scale: 500,
+  xProperty: 'system:time_start'
+}).setOptions({
+  title: 'Mean LST over time — Water (Sylhet district)',
+  vAxis: {title: 'LST (°C)'},
+  hAxis: {title: 'Date', format: 'yyyy-MM'},
+  legend: {position: 'none'}
+});
+
+// Urban time series chart
+var urbanChart = ui.Chart.image.series({
+  imageCollection: temp,
+  region: urbanVectors,
+  reducer: ee.Reducer.mean(),
+  scale: 500,
+  xProperty: 'system:time_start'
+}).setOptions({
+  title: 'Mean LST over time — Urban (Sylhet district)',
+  vAxis: {title: 'LST (°C)'},
+  hAxis: {title: 'Date', format: 'yyyy-MM'},
+  legend: {position: 'none'}
+});
+
+
+//  Prints (results & debug) — the script prints these below:
+print('Sylhet Feature (GAUL):', roi);
+print('IGBP class names (1-17):', igbpNames);
+print('Water time series chart (mean LST):', waterChart);
+print('Urban time series chart (mean LST):', urbanChart);
+
