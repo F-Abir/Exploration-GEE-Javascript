@@ -1,0 +1,81 @@
+//////////////////////////////////////////////
+// ROI: FAO GAUL Bangladesh                 //
+//////////////////////////////////////////////
+
+var roi =  ee.FeatureCollection('FAO/GAUL/2015/level2')
+             .filter(ee.Filter.eq('ADM2_NAME', 'Dhaka'))
+             .geometry();
+
+Map.centerObject(roi);
+
+var modis = ee.ImageCollection("MODIS/061/MOD13A2")
+  .select('NDVI')
+  .filterDate('2001','2021');
+
+function ndvi_time(img){
+  var time = img.metadata('system:time_start').divide(1e9);
+  return img.addBands(time)
+            .copyProperties(img, img.propertyNames());
+}
+
+var modis_time = modis.map(ndvi_time);
+
+//////////////////////////////
+// Linear Regression
+//////////////////////////////
+var linear_reg = modis_time
+    .select('system:time_start','NDVI')
+    .reduce(ee.Reducer.linearFit())
+    .select('scale');
+
+Map.addLayer(linear_reg.clip(roi),
+             {palette:['red','black','green']},
+             'linear_reg',
+             false);
+
+//////////////////////////////
+// Sen's Slope
+//////////////////////////////
+var sen_slope = modis_time
+    .select('system:time_start','NDVI')
+    .reduce(ee.Reducer.sensSlope())
+    .select('slope');
+
+Map.addLayer(sen_slope.clip(roi),
+             {palette:['red','black','green']},
+             'sens_slope',
+             false);
+
+//////////////////////////////
+// Mann-Kendall Trend with Significance
+//////////////////////////////
+var mannkendall = modis_time.select('NDVI')
+    .reduce(ee.Reducer.kendallsCorrelation());
+
+var sen_slope_mk = modis_time.select('system:time_start','NDVI')
+    .reduce(ee.Reducer.sensSlope())
+    .select('slope');
+
+// Mask non-significant pixels (p-value >= 0.05)
+var mk_sig = mannkendall.select('NDVI_p-value').lt(0.05);
+
+var mk_trend = mannkendall.select('NDVI_tau')
+                .addBands(sen_slope_mk)
+                .updateMask(mk_sig);
+
+// Visualize each band separately (Option 1)
+Map.addLayer(mk_trend.select('NDVI_tau').clip(roi),
+             {min:-1, max:1, palette:['red','black','green']},
+             'MK Tau');
+
+Map.addLayer(mk_trend.select('slope').clip(roi),
+             {min:-0.05, max:0.05, palette:['red','black','green']},
+             'Sen Slope');
+
+//////////////////////////////
+// Optional: FORMA Trend
+//////////////////////////////
+var forma = modis_time.select('NDVI')
+    .formaTrend();
+
+Map.addLayer(forma.clip(roi), [], 'forma', false);
