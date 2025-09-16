@@ -1,0 +1,119 @@
+// ROI (Sylhet, Bangladesh)
+var roi = ee.FeatureCollection('FAO/GAUL/2015/level2')
+  .filter(ee.Filter.eq('ADM0_NAME', 'Bangladesh'))
+  .filter(ee.Filter.inList('ADM2_NAME', ['Sylhet']))
+  .geometry();
+Map.addLayer(roi, {color: 'red'}, 'ROI');
+Map.centerObject(roi);
+
+// Time range (inclusive)
+var time_start = '2010-01-01';
+var time_end = '2020-12-31';
+var start = ee.Date(time_start);
+var end = ee.Date(time_end);
+
+// CHIRPS daily collection filtered to the period
+var pr = ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
+  .filterDate(start, end.advance(1, 'day')); // ensure end inclusive
+
+// build a sequence of months from start to end (inclusive)
+var monthsCount = ee.Number(end.difference(start, 'month')).add(1);
+var months = ee.List.sequence(0, monthsCount.subtract(1));
+
+// Map over months to create a FeatureCollection with one feature per month:
+// each feature has properties: system:time_start (millis), pr_mean (monthly mean), date (YYYY-MM)
+var monthlyFC = ee.FeatureCollection(
+  months.map(function(m) {
+    m = ee.Number(m);
+    var s = start.advance(m, 'month');
+    var e = s.advance(1, 'month');
+
+    // monthly mean of daily precipitation (mm/day)
+    var monthlyMeanImg = pr.filterDate(s, e).mean();
+
+    // zonal mean over ROI
+    var meanDict = monthlyMeanImg.reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: roi,
+      scale: 5560,         // ~0.05° CHIRPS resolution -> choose coarser to save memory
+      maxPixels: 1e13,
+      bestEffort: true     // lets the server choose a memory-efficient strategy
+    });
+
+    var meanVal = ee.Number(meanDict.values().get(0));
+
+    return ee.Feature(null, {
+      'system:time_start': s.millis(),
+      'pr_mean': meanVal,
+      'date': s.format('YYYY-MM')
+    });
+  })
+).filter(ee.Filter.notNull(['pr_mean'])) // drop months with null reductions
+  .sort('system:time_start');
+
+print('Monthly FeatureCollection (count):', monthlyFC.size());
+print('Monthly FeatureCollection (first 10):', monthlyFC.limit(10));
+
+// Chart: monthly time series (uses ui.Chart.feature.byFeature)
+var monthlyChart = ui.Chart.feature.byFeature(monthlyFC, 'date', ['pr_mean'])
+  .setChartType('ColumnChart')
+  .setOptions({
+    title: 'Monthly mean precipitation (CHIRPS) — mean over ROI',
+    hAxis: {title: 'Month', slantedText: true, slantedTextAngle: 45},
+    vAxis: {title: 'Precipitation (mm/day)'},
+    legend: {position: 'none'},
+    height: 360
+  });
+print(monthlyChart);
+
+// Split into dry / mid / wet months using the same thresholds you used earlier
+var dryMonthly = monthlyFC.filter(ee.Filter.lt('pr_mean', 0.5));
+var midMonthly = monthlyFC.filter(ee.Filter.gte('pr_mean', 0.5))
+                          .filter(ee.Filter.lte('pr_mean', 1));
+var wetMonthly = monthlyFC.filter(ee.Filter.gt('pr_mean', 1));
+
+print('Dry months count:', dryMonthly.size());
+print(ui.Chart.feature.byFeature(dryMonthly, 'date', ['pr_mean'])
+      .setChartType('ColumnChart')
+      .setOptions({title: 'Dry months (pr_mean < 0.5)', height: 220}));
+
+print('Wet months count:', wetMonthly.size());
+print(ui.Chart.feature.byFeature(wetMonthly, 'date', ['pr_mean'])
+      .setChartType('ColumnChart')
+      .setOptions({title: 'Wet months (pr_mean > 1)', height: 220}));
+
+// OPTIONAL: If you'd like to export the monthly time series table to Drive:
+// Export.table.toDrive({
+//   collection: monthlyFC,
+//   description: 'Sylhet_monthly_pr_mean_2010_2020',
+//   fileFormat: 'CSV'
+// });
+
+// OPTIONAL: If you really need DAILY values for a single year (memory careful example)
+// -- uncomment and set yearOfInterest to get daily pr_mean for that year only.
+// var yearOfInterest = 2015;
+// var dayStart = ee.Date.fromYMD(yearOfInterest, 1, 1);
+// var dayEnd = dayStart.advance(1, 'year');
+// var dailyFC = ee.FeatureCollection(
+//   ee.List.sequence(0, dayEnd.difference(dayStart, 'day').subtract(1)).map(function(d){
+//     d = ee.Number(d);
+//     var s = dayStart.advance(d, 'day');
+//     var e = s.advance(1, 'day');
+//     var dailyImg = pr.filterDate(s, e).mean();
+//     var dict = dailyImg.reduceRegion({
+//       reducer: ee.Reducer.mean(),
+//       geometry: roi,
+//       scale: 5560,
+//       maxPixels: 1e13,
+//       bestEffort: true
+//     });
+//     var val = ee.Number(dict.values().get(0));
+//     return ee.Feature(null, {
+//       'system:time_start': s.millis(),
+//       'pr_mean': val,
+//       'date': s.format('YYYY-MM-dd')
+//     });
+//   })
+// ).filter(ee.Filter.notNull(['pr_mean'])).sort('system:time_start');
+// print('Daily for', yearOfInterest, dailyFC.size());
+// print(ui.Chart.feature.byFeature(dailyFC, 'date', ['pr_mean']).setChartType('ColumnChart'));
