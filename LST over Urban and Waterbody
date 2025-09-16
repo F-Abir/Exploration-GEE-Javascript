@@ -1,0 +1,77 @@
+// AOI: Sylhet from FAO GAUL (reproducible admin geometry)
+var gaul = ee.FeatureCollection('FAO/GAUL/2015/level2');
+var sylhet = ee.Feature(gaul.filter(ee.Filter.and(
+  ee.Filter.eq('ADM0_NAME','Bangladesh'),
+  ee.Filter.eq('ADM2_NAME','Sylhet')
+)).first());
+var roi = sylhet.geometry();
+Map.centerObject(roi, 9);
+
+// IGBP land cover (modal map) → binary masks for classes 13 & 17
+var lcModal = ee.ImageCollection('MODIS/061/MCD12Q1')
+  .select('LC_Type1').mode().clip(roi);
+var urbanMask = lcModal.eq(13);
+var waterMask = lcModal.eq(17);
+
+// MODIS LST (8-day), °C
+var temp = ee.ImageCollection('MODIS/061/MOD11A2')
+  .select('LST_Day_1km')
+  .filterDate('2001-01-01','2024-12-31')
+  .map(function(img){
+    return img.multiply(0.02).subtract(273.15)
+              .copyProperties(img, img.propertyNames());
+  });
+
+// Helper to build a tidy series for a given mask
+function seriesForMask(mask, label){
+  // mask the image, then mean over the district polygon (cheap & stable)
+  var fc = temp.map(function(img){
+    var masked = img.updateMask(mask);
+    var mean = masked.reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: roi,
+      scale: 1000,          // 1 km is adequate for MODIS LST
+      bestEffort: true,
+      maxPixels: 1e13
+    }).get('LST_Day_1km');
+    var count = masked.reduceRegion({
+      reducer: ee.Reducer.count(),
+      geometry: roi,
+      scale: 1000,
+      bestEffort: true,
+      maxPixels: 1e13
+    }).get('LST_Day_1km');
+    return ee.Feature(null, {
+      date_millis: img.get('system:time_start'),
+      date_utc: ee.Date(img.get('system:time_start')).format('YYYY-MM-dd'),
+      class: label,
+      mean_c: mean,            // may be null → will be interpolated later
+      n_valid: count
+    });
+  });
+  return ee.FeatureCollection(fc);
+}
+
+// Build tables
+var urbanTbl = seriesForMask(urbanMask, 'urban');
+var waterTbl = seriesForMask(waterMask, 'water');
+
+// Combine (optional)
+var bothTbl = urbanTbl.merge(waterTbl);
+
+// Preview and enable CSV download via chart UI
+var urbanChart = ui.Chart.feature.byFeature({
+  features: urbanTbl,
+  xProperty: 'date_millis',
+  yProperties: ['mean_c']
+}).setOptions({title: 'Urban LST (mean °C) — 8-day'});
+print('Urban series (feature table):', urbanTbl.limit(5));
+print(urbanChart);
+
+var waterChart = ui.Chart.feature.byFeature({
+  features: waterTbl,
+  xProperty: 'date_millis',
+  yProperties: ['mean_c']
+}).setOptions({title: 'Water LST (mean °C) — 8-day'});
+print('Water series (feature table):', waterTbl.limit(5));
+print(waterChart);
