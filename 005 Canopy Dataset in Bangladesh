@@ -1,0 +1,40 @@
+/**** Minimalist GEE Script: Canopy Height Data Availability – Bangladesh ****/
+
+// 1. AOI: Bangladesh boundary (FAO GAUL 2015 Level 0)
+var bangladesh = ee.FeatureCollection('FAO/GAUL/2015/level0')
+                     .filter(ee.Filter.eq('ADM0_NAME', 'Bangladesh'));
+Map.centerObject(bangladesh, 6);
+Map.addLayer(bangladesh, {color: 'blue'}, 'Bangladesh');
+
+// 2. Datasets
+var metaCanopy = ee.ImageCollection('projects/meta-forest-monitoring-okw37/assets/CanopyHeight').mosaic();
+var mangroveCanopy = ee.Image('NASA/JPL/global_forest_canopy_height_2005'); // Example mangrove/forest height
+
+// 3. Quick existence check – pixel counts inside Bangladesh
+var scale = 100; // coarse scale for speed
+
+var counts = {
+  'Meta_1m': metaCanopy.reduceRegion({
+      reducer: ee.Reducer.count(),
+      geometry: bangladesh,
+      scale: scale,
+      maxPixels: 1e13
+  }),
+  
+  'Global_Forest_Height': mangroveCanopy.reduceRegion({
+      reducer: ee.Reducer.count(),
+      geometry: bangladesh,
+      scale: scale,
+      maxPixels: 1e13
+  })
+};
+
+print('Pixel counts (presence >0 means data exist):', counts);
+
+// 4. Optional quick display (low-res just to confirm presence)
+Map.addLayer(metaCanopy.clip(bangladesh), {min:0, max:30, palette:['yellow','green','darkgreen']}, 'Meta Canopy');
+Map.addLayer(mangroveCanopy.clip(bangladesh), {min:0, max:30, palette:['pink','red','brown']}, 'Global Forest Height');
+
+
+
+
