@@ -1,0 +1,200 @@
+
+// ------------------------------- A) Dataset availability (years, months, dates) -------------------------------
+var popIC_raw = ee.ImageCollection('JRC/GHSL/P2023A/GHS_POP');
+
+var popIC = popIC_raw.map(function(img){
+  var d = ee.Date(img.get('system:time_start'));
+  return img.set({
+    'year': d.get('year'),
+    'month': d.get('month'),
+    'day': d.get('day'),
+    'date_str': d.format('YYYY-MM-dd')
+  });
+});
+
+var years  = ee.List(popIC.aggregate_array('year')).distinct().sort();
+var months = ee.List(popIC.aggregate_array('month')).distinct().sort();
+var dates  = ee.List(popIC.aggregate_array('date_str')).distinct().sort();
+
+var earliest = ee.Date(ee.Image(popIC.sort('system:time_start').first()).get('system:time_start')).format('YYYY-MM-dd');
+var latest   = ee.Date(ee.Image(popIC.sort('system:time_start', false).first()).get('system:time_start')).format('YYYY-MM-dd');
+
+print('GHS_POP availability → years:', years);
+
+// ------------------------------- B) AOI from FAO GAUL (Gazipur district) -------------------------------
+var gaul2 = ee.FeatureCollection('FAO/GAUL/2015/level2');
+var bd_districts = gaul2.filter(ee.Filter.eq('ADM0_NAME', 'Bangladesh'));
+var gazipur = bd_districts.filter(ee.Filter.eq('ADM2_NAME', 'Gazipur'));
+
+print('GAUL districts (Bangladesh) count:', bd_districts.size());
+print('Gazipur feature count (expect 1):', gazipur.size());
+
+var roi = gazipur.geometry();
+Map.centerObject(roi, 9);
+Map.addLayer(gazipur.style({color: 'red', fillColor: '00000000', width: 2}), {}, 'Gazipur (GAUL L2)', true);
+
+// ------------------------------- C) Population totals per epoch (sum over AOI) -------------------------------
+var popTS = popIC.map(function(img) {
+  var sumDict = img.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: roi,
+    scale: ee.Image(img).projection().nominalScale(), // native scale per epoch
+    maxPixels: 1e13,
+    bestEffort: true
+  });
+
+  // Safely pick first band present (GHS_POP images are single-band)
+  var bandName = ee.String(ee.List(sumDict.keys()).get(0));
+  var popSum = ee.Number(sumDict.get(bandName));
+  var yearStr = ee.Date(img.get('system:time_start')).format('YYYY');
+
+  return ee.Feature(null, {
+    'year': yearStr,
+    'pop_sum': popSum,
+    'system:time_start': img.get('system:time_start')
+  });
+});
+
+var popFC = ee.FeatureCollection(popTS).sort('system:time_start');
+print('Population time series (Gazipur):', popFC.limit(12));
+
+// ------------------------------- D) Time-series chart (AOI totals) ------------------------------------------
+var chartTS = ui.Chart.feature.byFeature({
+  features: popFC,
+  xProperty: 'year',
+  yProperties: ['pop_sum']
+})
+.setChartType('LineChart')
+.setOptions({
+  title: 'Gazipur district: Total population by GHSL epoch',
+  hAxis: {title: 'Year'},
+  vAxis: {title: 'Population (sum over AOI)'},
+  lineWidth: 3,
+  pointSize: 5,
+  legend: {position: 'none'}
+});
+print(chartTS);
+
+// ------------------------------- E) Quick visualization: latest epoch ---------------------------------------
+var latestImg0 = ee.Image(popIC.sort('system:time_start', false).first());
+var latestBand = latestImg0.bandNames().get(0);
+var latestImg  = latestImg0.select([latestBand]);
+
+var vis = {min: 0, max: 1000, palette: ['ffffe5','fee391','fe9929','cc4c02','662506']}; // adjust max after checking hist
+Map.addLayer(latestImg.clip(roi), vis, 'Latest GHSL population (relative density)', false);
+
+// ------------------------------- F) Histograms (pixel value distributions) ----------------------------------
+// 1) Server-side fixed histogram dictionary (good for quick thresholds)
+var fixedHist = latestImg.reduceRegion({
+  reducer: ee.Reducer.fixedHistogram({min: 0, max: 1700, steps: 50}),
+  geometry: roi,
+  scale: latestImg.projection().nominalScale(),
+  maxPixels: 1e13,
+  bestEffort: true
+});
+print('Fixed histogram (latest epoch, Gazipur):', fixedHist);
+
+// 2) ui.Chart.image.histogram for LATEST epoch (linear scale)
+var chartHistLatest = ui.Chart.image.histogram({
+  image: latestImg,
+  region: roi,
+  scale: latestImg.projection().nominalScale(),
+  maxBuckets: 50,          // more bins for detail; reduce if noisy
+  minBucketWidth: 5,       // persons per pixel; tune to your scale
+  maxPixels: 1e8           // control server load; raise cautiously if AOI is large
+})
+.setOptions({
+  title: 'Histogram (Latest epoch) — Pixel population values in Gazipur',
+  hAxis: {title: 'Pixel value (persons)'},
+  vAxis: {title: 'Frequency (pixel count)'}
+});
+print(chartHistLatest);
+
+// 3) ui.Chart.image.histogram for LATEST epoch (log y-axis for skewed tails)
+var chartHistLatestLog = ui.Chart.image.histogram({
+  image: latestImg,
+  region: roi,
+  scale: latestImg.projection().nominalScale(),
+  maxBuckets: 50,
+  minBucketWidth: 1,
+  maxPixels: 1e8
+})
+.setOptions({
+  title: 'Histogram (Latest epoch, log scale) — Pixel population values in Gazipur',
+  hAxis: {title: 'Pixel value (persons)'},
+  vAxis: {title: 'Frequency (log scale)', scaleType: 'log'}
+});
+print(chartHistLatestLog);
+
+
+// ------------------------------- G) Optional: Point time-series (sanity check) ------------------------------
+var poi = ee.Geometry.Point(90.413, 23.999); // adjust to ward/union if needed
+Map.addLayer(poi, {color: 'blue'}, 'POI in Gazipur', false);
+
+var chartPoint = ui.Chart.image.series({
+  imageCollection: popIC,
+  region: poi,
+  reducer: ee.Reducer.first(),
+  scale: ee.Image(popIC.first()).projection().nominalScale()
+}).setOptions({
+  title: 'POI pixel population value (not total)',
+  hAxis: {title: 'Year'},
+  vAxis: {title: 'Pixel value'},
+  pointSize: 4,
+  lineWidth: 2
+});
+print(chartPoint);
+
+var fixedHist = latestImg.reduceRegion({
+  reducer: ee.Reducer.fixedHistogram(0, 200, 100),  // <-- changed line
+  geometry: roi,
+  scale: latestImg.projection().nominalScale(),
+  maxPixels: 1e13,
+  bestEffort: true
+});
+print('Fixed histogram (latest epoch, Gazipur):', fixedHist);
+
+
+// 0) Get the band key used in fixedHist (same band you reduced)
+var bandKey = ee.String(latestImg.bandNames().get(0));
+
+// 1) Get the N×2 array and turn into a List of [low, count]
+var arr      = ee.Array(ee.Dictionary(fixedHist).get(bandKey));
+var binsList = arr.toList();  // now a List of Lists
+
+// 2) Derive bin width from first two rows (fallback = 1 if only 1 bin)
+var n  = binsList.size();
+var bw = ee.Number(ee.Algorithms.If(
+  n.gt(1),
+  ee.Number(ee.List(binsList.get(1)).get(0))
+    .subtract(ee.Number(ee.List(binsList.get(0)).get(0))),
+  1
+));
+
+// 3) Build features: [low, count] → {bin_low, bin_high, bin_mid, count}
+var idx = ee.List.sequence(0, n.subtract(1));
+var binsFC = ee.FeatureCollection(idx.map(function(i){
+  i = ee.Number(i);
+  var row = ee.List(binsList.get(i));
+  var low = ee.Number(row.get(0));
+  var cnt = ee.Number(row.get(1));
+  var high = low.add(bw);
+  var mid  = low.add(high).divide(2);
+  return ee.Feature(null, {
+    bin_low: low, bin_high: high, bin_mid: mid, count: cnt
+  });
+}));
+
+// 4) Column chart (no blank gaps between bins)
+var chartFixed3 = ui.Chart.feature.byFeature({
+  features: binsFC, xProperty: 'bin_mid', yProperties: ['count']
+})
+.setChartType('ColumnChart')
+.setOptions({
+  title: 'Histogram (from fixedHistogram bins)',
+  hAxis: { title: 'Pixel value (persons)' },
+  vAxis: { title: 'Frequency (pixel count)' },
+  legend: { position: 'none' },
+  bar: { groupWidth: '100%' }
+});
+print(chartFixed3);
