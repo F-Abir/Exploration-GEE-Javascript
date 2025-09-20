@@ -1,0 +1,212 @@
+
+// ---------- 0) Params ----------
+var AREA_SCALE_FINE   = 10;   // main estimate
+var AREA_SCALE_COARSE = 30;   // sensitivity
+var MAX_PIXELS        = 2e9;  // guard large AOIs
+
+// ---------- 1) AOI: GAUL → Gazipur ----------
+var gaul2   = ee.FeatureCollection('FAO/GAUL/2015/level2');
+var bd      = gaul2.filter(ee.Filter.eq('ADM0_NAME', 'Bangladesh'));
+var gazipur = bd.filter(ee.Filter.eq('ADM2_NAME', 'Gazipur'))
+                .geometry().dissolve();
+Map.centerObject(gazipur, 10);
+Map.addLayer(ee.Image().paint(gazipur, 1, 2), {palette: ['black']}, 'AOI: Gazipur boundary', true);
+
+// ---------- 2) GHSL collection & epochs ----------
+var ghsl = ee.ImageCollection('JRC/GHSL/P2023A/GHS_BUILT_S')
+  .select(['built_surface'])
+  .filterBounds(gazipur);
+
+// Epoch labels (strings) and sorted numeric years
+var epochLabels = ghsl.aggregate_array('system:index').distinct().sort();
+print('GHSL images (system:index) intersecting AOI:', epochLabels);
+
+var years = ee.List(epochLabels)
+  .map(function(s){ return ee.Number.parse(ee.String(s)); })
+  .sort();
+print('Parsed numeric years (sorted):', years);
+
+// ---------- 3) Helpers ----------
+function collectionForYear(year){
+  var yStr = ee.Number(year).format();   // safe cast to ee.String
+  return ghsl.filter(ee.Filter.eq('system:index', yStr));
+}
+function imageForYearOrEmpty(year){
+  var collY  = collectionForYear(year);
+  var exists = collY.size().gt(0);
+  return ee.Image(ee.Algorithms.If(
+    exists, ee.Image(collY.first()),
+    ee.Image().selfMask()   // empty placeholder if missing
+  ));
+}
+// Sum built_surface (m²/pixel) over AOI at given scale → km² (may be null)
+function areaKm2AtScale(img, geom, scale){
+  var dict  = img.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: geom,
+    scale: scale,
+    maxPixels: MAX_PIXELS,
+    bestEffort: true
+  });
+  var sum_m2 = ee.Number(dict.get('built_surface'));
+  return sum_m2.divide(1e6);   // m² → km²
+}
+// Null-safe math helpers (avoid ee.Algorithms.Or/And)
+function isNull(x){ return ee.Algorithms.IsEqual(x, null); }
+function safeSubtract(a, b){
+  return ee.Algorithms.If(
+    isNull(a), null,
+    ee.Algorithms.If(
+      isNull(b), null,
+      ee.Number(a).subtract(ee.Number(b))
+    )
+  );
+}
+function safePctChange(cur, prev){
+  return ee.Algorithms.If(
+    isNull(cur), null,
+    ee.Algorithms.If(
+      isNull(prev), null,
+      ee.Algorithms.If(
+        ee.Algorithms.IsEqual(prev, 0), null,
+        ee.Number(cur).subtract(ee.Number(prev)).divide(ee.Number(prev)).multiply(100)
+      )
+    )
+  );
+}
+
+// ---------- 4) Yearwise totals (km²) for ALL available epochs ----------
+var features = ee.FeatureCollection(years.map(function(y){
+  y = ee.Number(y);
+  var img             = imageForYearOrEmpty(y);
+  var sum_km2_fine    = areaKm2AtScale(img, gazipur, AREA_SCALE_FINE);
+  var sum_km2_coarse  = areaKm2AtScale(img, gazipur, AREA_SCALE_COARSE);
+
+  var feat = ee.Feature(null, {
+    'year': y,
+    'aoi_name': 'Gazipur (GAUL 2015 L2)'
+  });
+  feat = feat
+    .set('built_km2_scale' + AREA_SCALE_FINE,   sum_km2_fine)
+    .set('built_km2_scale' + AREA_SCALE_COARSE, sum_km2_coarse)
+    .set('diff_km2_' + AREA_SCALE_FINE + '_minus_' + AREA_SCALE_COARSE,
+         safeSubtract(sum_km2_fine, sum_km2_coarse));
+  return feat;
+}));
+print('Yearwise built-up totals (km²):', features);
+print('Row count:', features.size());
+
+// ---------- 5) Pairwise growth stats (Δ km², %), consecutive epochs ----------
+var yearsTail = years.slice(1);  // drop first
+var growthFC = ee.FeatureCollection(yearsTail.map(function(curY){
+  curY = ee.Number(curY);
+  var idx   = years.indexOf(curY);
+  var prevY = ee.Number(years.get(ee.Number(idx).subtract(1)));
+
+  // Look up totals from the features table (fine scale)
+  var curFeat = ee.Feature(features.filter(ee.Filter.eq('year', curY)).first());
+  var prvFeat = ee.Feature(features.filter(ee.Filter.eq('year', prevY)).first());
+  var aCur    = ee.Number(curFeat.get('built_km2_scale' + AREA_SCALE_FINE));
+  var aPrev   = ee.Number(prvFeat.get('built_km2_scale' + AREA_SCALE_FINE));
+
+  var deltaKm2 = safeSubtract(aCur, aPrev);
+  var pct      = safePctChange(aCur, aPrev);
+
+  var feat = ee.Feature(null, {'from_year': prevY, 'to_year': curY})
+    .set('delta_km2_scale' + AREA_SCALE_FINE, deltaKm2)
+    .set('pct_change_scale' + AREA_SCALE_FINE, pct);
+
+  return feat;
+}));
+print('Pairwise growth (Δ km² and %), consecutive epochs:', growthFC);
+
+// ---------- 6) First–last summary (total growth & CAGR, fine scale) ----------
+var firstYear = ee.Number(years.get(0));
+var lastYear  = ee.Number(years.get(ee.Number(years.size()).subtract(1)));
+var spanYears = lastYear.subtract(firstYear);
+
+var firstA = ee.Number(ee.Feature(features.filter(ee.Filter.eq('year', firstYear)).first())
+                       .get('built_km2_scale' + AREA_SCALE_FINE));
+var lastA  = ee.Number(ee.Feature(features.filter(ee.Filter.eq('year', lastYear)).first())
+                       .get('built_km2_scale' + AREA_SCALE_FINE));
+
+var totalGrowthKm2 = safeSubtract(lastA, firstA);
+var cagrPct = ee.Algorithms.If(
+  isNull(totalGrowthKm2), null,
+  ee.Algorithms.If(
+    isNull(firstA), null,
+    ee.Algorithms.If(
+      ee.Algorithms.IsEqual(firstA, 0), null,
+      ee.Algorithms.If(
+        ee.Algorithms.IsEqual(spanYears, 0), null,
+        ee.Number(lastA).divide(firstA).pow(ee.Number(1).divide(spanYears)).subtract(1).multiply(100)
+      )
+    )
+  )
+);
+
+print('First–last summary (scale ' + AREA_SCALE_FINE + ' m):',
+      ee.Dictionary({
+        'first_year'           : firstYear,
+        'last_year'            : lastYear,
+        'span_years'           : spanYears,
+        'first_built_km2'      : firstA,
+        'last_built_km2'       : lastA,
+        'total_growth_km2'     : totalGrowthKm2,
+        'CAGR_percent_per_year': cagrPct
+      }));
+
+// ---------- 7) Console Charts ----------
+var chartLevels = ui.Chart.feature.byFeature(features, 'year', 'built_km2_scale' + AREA_SCALE_FINE)
+  .setChartType('ColumnChart')
+  .setOptions({
+    title: 'Gazipur built-up total (km²) — scale ' + AREA_SCALE_FINE + ' m',
+    hAxis: {title: 'Year'},
+    vAxis: {title: 'Built-up area (km²)'},
+    legend: {position: 'none'}
+  });
+print('Chart — built-up totals (fine scale)', chartLevels);
+
+var chartGrowth = ui.Chart.feature.byFeature(growthFC, 'to_year', 'delta_km2_scale' + AREA_SCALE_FINE)
+  .setChartType('ColumnChart')
+  .setOptions({
+    title: 'Δ built-up (km²) between consecutive epochs — scale ' + AREA_SCALE_FINE + ' m',
+    hAxis: {title: 'To year'},
+    vAxis: {title: 'Δ built-up (km²)'},
+    legend: {position: 'none'}
+  });
+print('Chart — pairwise growth (km²)', chartGrowth);
+
+var chartPct = ui.Chart.feature.byFeature(growthFC, 'to_year', 'pct_change_scale' + AREA_SCALE_FINE)
+  .setChartType('LineChart')
+  .setOptions({
+    title: '% change between consecutive epochs — scale ' + AREA_SCALE_FINE + ' m',
+    hAxis: {title: 'To year'},
+    vAxis: {title: '% change'},
+    legend: {position: 'none'},
+    pointSize: 5
+  });
+print('Chart — pairwise % change', chartPct);
+
+// ---------- 8) Map Layers (first/last + Δ) ----------
+var visBuilt = {min: 0, max: 100, palette: ['#f7fbff','#c6dbef','#6baed6','#2171b5','#08306b']};
+var visDelta = {min: -50, max: 50, palette: ['#313695','#74add1','#f7f7f7','#f46d43','#a50026']};
+
+var imgFirst = imageForYearOrEmpty(firstYear);
+var imgLast  = imageForYearOrEmpty(lastYear);
+Map.addLayer(imgFirst.clip(gazipur), visBuilt, 'GHSL built_surface ' + firstYear.getInfo() + ' (m²/pixel)', false);
+Map.addLayer(imgLast.clip(gazipur),  visBuilt, 'GHSL built_surface ' + lastYear.getInfo()  + ' (m²/pixel)', true);
+
+var deltaImg = imgLast.subtract(imgFirst).rename('delta_m2_per_pixel');
+Map.addLayer(deltaImg.clip(gazipur), visDelta,
+             'Δ built_surface ' + firstYear.getInfo() + '–' + lastYear.getInfo(), true);
+
+// ---------- 9) Export CSV (all epochs) ----------
+Export.table.toDrive({
+  collection: features,
+  description: 'gazipur_ghsl_builtup_km2_P2023A_all_epochs',
+  folder: 'ghsl_outputs',
+  fileNamePrefix: 'gazipur_ghsl_builtup_km2_P2023A_all_epochs',
+  fileFormat: 'CSV'
+});
+
