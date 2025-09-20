@@ -1,0 +1,144 @@
+
+// --------------------------- 0) Parameters ---------------------------
+var Y1 = 2003, Y2 = 2020;      // robust overlap for MOD13Q1 & MOD11A2
+var N_THRESHOLD = 8;           // minimum paired years per pixel to display r
+var HIST_SCALE = 1000;         // reduction scale (~LST native)
+var MAX_PIXELS = 1e9;          // reduceRegion guard (does not raise memory ceiling)
+
+// --------------------------- 1) AOI: GAUL → Gazipur (clean topology) ---------------------------
+var gazipur = ee.FeatureCollection('FAO/GAUL/2015/level2')
+  .filter(ee.Filter.eq('ADM0_NAME','Bangladesh'))
+  .filter(ee.Filter.eq('ADM2_NAME','Gazipur'))
+  .geometry()
+  .dissolve()
+  .simplify(100);   // ~100 m tolerance removes micro slivers/self-intersections
+
+Map.centerObject(gazipur, 10);
+Map.addLayer(ee.Image().paint(gazipur, 1, 2), {palette:['black']}, 'AOI: Gazipur (outline)', false);
+
+// --------------------------- 2) Collections ---------------------------
+var ndviCol = ee.ImageCollection('MODIS/061/MOD13Q1').select('NDVI');           // 16-day, 250 m, ×0.0001
+var lstCol  = ee.ImageCollection('MODIS/061/MOD11A2').select('LST_Day_1km');    // 8-day, 1 km, ×0.02 K
+
+// (Optional strictness)
+// var DRY_START = 11, DRY_END = 4;  // Nov→Apr
+// ndviCol = ndviCol.filter(ee.Filter.calendarRange(DRY_START, DRY_END, 'month'));
+// lstCol  = lstCol .filter(ee.Filter.calendarRange(DRY_START, DRY_END, 'month'));
+// TODO (advanced): apply MOD13Q1 SummaryQA & MOD11A2 LST quality masks before annual means
+
+// --------------------------- 3) Annual paired images [ndvi, lst] ---------------------------
+var years = ee.List.sequence(Y1, Y2);
+var pairedIC = ee.ImageCollection(years.map(function(y){
+  y = ee.Number(y);
+  var start = ee.Date.fromYMD(y,1,1), end = start.advance(1,'year');
+
+  var ndviY = ndviCol.filterDate(start, end)
+    .map(function(img){ return img.multiply(0.0001); })    // scale to [-1,1]
+    .mean()
+    .rename('ndvi');
+
+  var lstY = lstCol.filterDate(start, end)
+    .map(function(img){ return img.multiply(0.02).subtract(273.15); }) // K→°C
+    .mean()
+    .rename('lst');
+
+  var bothMask = ndviY.mask().and(lstY.mask());
+  var id = ee.String('Y').cat(ee.Number(y).format('%.0f')); // e.g., "Y2003"
+
+  return ndviY.addBands(lstY)
+    .updateMask(bothMask)
+    .set('year', y)
+    .set('system:index', id);
+}));
+
+// --------------------------- 4) Stack years into band vectors ---------------------------
+var ndviStack = pairedIC.select('ndvi').toBands();   // Y2003_ndvi, Y2004_ndvi, ...
+var lstStack  = pairedIC.select('lst').toBands();    // Y2003_lst,  Y2004_lst,  ...
+
+// --------------------------- 5) Per-pixel Pearson r across year-bands ---------------------------
+var meanX = ndviStack.reduce(ee.Reducer.mean());
+var meanY = lstStack .reduce(ee.Reducer.mean());
+var sdX   = ndviStack.reduce(ee.Reducer.stdDev());
+var sdY   = lstStack .reduce(ee.Reducer.stdDev());
+var covXY = ndviStack.subtract(meanX).multiply( lstStack.subtract(meanY) ).reduce(ee.Reducer.mean());
+var rImg  = covXY.divide(sdX.multiply(sdY)).rename('r');
+
+// Paired-year count (N) from valid NDVI bands (paired mask already enforced)
+var Nimg = ndviStack.mask().reduce(ee.Reducer.count()).rename('N');
+
+// Mask r by N threshold
+var rMasked = rImg.updateMask(Nimg.gte(N_THRESHOLD));
+
+// --------------------------- 6) Visualization ---------------------------
+var rPalette = ['#313695','#4575b4','#74add1','#abd9e9','#e0f3f8','#ffffbf','#fee090','#fdae61','#f46d43','#d73027','#a50026'];
+
+Map.addLayer(
+  rMasked.clip(gazipur),
+  {min:-1, max:1, palette: rPalette},
+  'Per-pixel Pearson r (NDVI vs LST)'
+);
+Map.addLayer(
+  Nimg.clip(gazipur),
+  {min:0, max:(Y2 - Y1 + 1)},
+  'N (paired years)', false
+);
+
+// Histogram of r (masked to N ≥ threshold)
+print(
+  ui.Chart.image.histogram({
+    image: rMasked, region: gazipur, scale: HIST_SCALE, maxBuckets: 50
+  }).setOptions({title:'Distribution of per-pixel r (N ≥ ' + N_THRESHOLD + ')',
+                 hAxis:{title:'r'}, vAxis:{title:'Pixel count'}})
+);
+
+// --------------------------- 7) AOI-average r (scalar) ---------------------------
+var r_mean_AOI = rMasked.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: gazipur,
+  scale: HIST_SCALE,
+  bestEffort: true,
+  maxPixels: MAX_PIXELS
+}).get('r');
+print('Gazipur AOI-average Pearson r (NDVI vs LST):', r_mean_AOI);
+
+// --------------------------- 8) Legend (discrete swatches EXACTLY matching map palette) — FIXED ---------------------------
+var N_THRESHOLD_LABEL = N_THRESHOLD;  // keep consistent with mask
+
+// All break computations in ee.Number space (avoid client-server mixing)
+var rMinN = ee.Number(-1);
+var rMaxN = ee.Number(1);
+var nColors = rPalette.length;
+var denom = ee.Number(nColors - 1);
+
+var breaks = ee.List.sequence(0, nColors - 1).map(function(i){
+  i = ee.Number(i);
+  var t = i.divide(denom);                             // 0..1
+  return rMinN.add( t.multiply( rMaxN.subtract(rMinN) ) );
+});
+
+var legend = ui.Panel({style:{position:'bottom-left', padding:'8px', backgroundColor:'rgba(255,255,255,0.9)'}});
+legend.add(ui.Label({value:'Pearson’s r  (NDVI vs LST)', style:{fontWeight:'bold', fontSize:'13px', margin:'0 0 6px 0'}}));
+
+for (var i = 0; i < nColors; i++) {
+  var color = rPalette[i];
+  // Format each break value to string on the client
+  var valStr = ee.Number(breaks.get(i)).format('%.2f').getInfo();
+  legend.add(ui.Panel({
+    widgets: [
+      ui.Label('', {backgroundColor: color, padding: '8px', margin: '2px 6px 2px 0', width: '24px'}),
+      ui.Label(valStr, {fontSize:'12px', margin:'2px 0'})
+    ],
+    layout: ui.Panel.Layout.flow('horizontal'),
+    style: {stretch: 'horizontal'}
+  }));
+}
+legend.add(ui.Label({value: 'Shown where N ≥ ' + N_THRESHOLD_LABEL + ' valid years', style:{fontSize:'12px', color:'#444', margin:'6px 0 0 0'}}));
+Map.add(legend);
+
+// --------------------------- 9) Diagnostics ---------------------------
+print('Years window:', Y1, '→', Y2);
+print('Max possible N (years):', (Y2 - Y1 + 1));
+print('Preview N min/max (within AOI):',
+  Nimg.reduceRegion({reducer: ee.Reducer.minMax(), geometry: gazipur, scale: HIST_SCALE, bestEffort: true})
+);
+
