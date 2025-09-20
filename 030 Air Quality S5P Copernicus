@@ -1,0 +1,57 @@
+var cor = [91.09050885517992, 23.57496936569026];
+var geometry = ee.Geometry.Point(cor);
+
+var table = ee.FeatureCollection("FAO/GAUL/2015/level2");
+var roi = table.filterBounds(geometry).map(function(feature){
+  return feature.simplify(500);
+});
+
+Map.centerObject(roi);
+Map.addLayer(roi);
+
+var time_start = '2019', time_end = '2024';
+
+// Load full ImageCollection without filtering to just one band
+var co = ee.ImageCollection("COPERNICUS/S5P/NRTI/L3_CO")
+  .filterDate(time_start, time_end)
+  .filterBounds(roi);
+
+// Get band names dynamically
+var bandNames = co.first().bandNames();
+print('Bands available:', bandNames);
+
+// Year–month list
+var years_list = ee.List.sequence(ee.Number.parse(time_start), ee.Number.parse(time_end).subtract(1));
+var months_list = ee.List.sequence(1, 12);
+
+// Function to make monthly composites
+var co_monthly = ee.ImageCollection(
+  years_list.map(function(year){
+    return months_list.map(function(month){
+      var image = co.filter(ee.Filter.calendarRange(year, year, 'year'))
+                    .filter(ee.Filter.calendarRange(month, month, 'month')).mean();
+      var date = ee.Date.fromYMD(year, month, 1);
+      return image.set('system:time_start', date.millis());
+    });
+  }).flatten()
+);
+
+// Show mean of all bands as a quick layer (optional)
+Map.addLayer(co_monthly.mean().clip(roi), {}, 'mean_all_bands', false);
+
+// === Create charts for each band ===
+bandNames.evaluate(function(bands){
+  bands.forEach(function(band){
+    var chart = ui.Chart.image.series(
+      co_monthly.select(band), geometry, ee.Reducer.mean(), 7000, 'system:time_start'
+    )
+    .setOptions({
+      title: 'Time Series of ' + band,
+      vAxis: {title: band},
+      hAxis: {title: 'Date'},
+      pointSize: 3
+    });
+    
+    print(chart);
+  });
+});
