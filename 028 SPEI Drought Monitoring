@@ -1,0 +1,135 @@
+// -------------------------
+// AOI: Bangladesh boundary
+// -------------------------
+var countries = ee.FeatureCollection('USDOS/LSIB_SIMPLE/2017');
+var bangladesh = countries.filter(ee.Filter.eq('country_na', 'Bangladesh')).geometry();
+
+// -------------------------
+// SPEI (same collection, band, dates)
+// -------------------------
+var spei = ee.ImageCollection('CSIC/SPEI/2_9')
+  .select('SPEI_12_month')
+  .filterDate('1980', '2023');
+
+// -------------------------
+// Time series over Bangladesh (same reducer/scale)
+// -------------------------
+print(
+  ui.Chart.image.series(spei, bangladesh, ee.Reducer.mean(), 55000, 'system:time_start')
+    .setChartType('ScatterChart')
+    .setOptions({title: '12-month SPEI mean — Bangladesh (1980–2023)', pointSize: 2})
+);
+
+// -------------------------
+// Compute mean SPEI value per image and classify (same logic)
+// -------------------------
+var spei_mean = spei.map(function(img){
+  var mean = ee.Number(
+    img.reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: bangladesh,
+      scale: 55000,
+      bestEffort: true
+    }).values().get(0)
+  );
+  return img.copyProperties(img, img.propertyNames()).set('spei', mean);
+});
+
+var spei_class = spei_mean.map(function(img){
+  var s = ee.Number(img.get('spei'));
+  var cls = ee.Algorithms.If(s.lte(-2.0), 'Severe Drought',
+            ee.Algorithms.If(s.gt(-2.0).and(s.lte(-1)), 'Moderate Drought',
+            ee.Algorithms.If(s.gt(-1).and(s.lte(0)),  'Mild Drought',
+            ee.Algorithms.If(s.gt(0).and(s.lte(1)),   'Normal Drought',
+            ee.Algorithms.If(s.gt(1),                 'No Drought', 'No Drought')))));
+  return img.copyProperties(img, img.propertyNames()).set('spei_class', ee.String(cls));
+});
+
+// Optional: series using class-named bands (same idea as before)
+var drought = spei_class.map(function(img){
+  var name = ee.String(img.get('spei_class'));
+  return img.rename(name).copyProperties(img, img.propertyNames());
+});
+
+print(
+  ui.Chart.image.series(drought, bangladesh, ee.Reducer.mean(), 55000, 'system:time_start')
+    .setChartType('ScatterChart')
+    .setOptions({title: 'Drought Monitoring — Bangladesh (class-named bands)', pointSize: 3})
+);
+
+// -------------------------
+// Decade stamps (10-year intervals) for map + histograms
+// -------------------------
+var decades = [
+  {label: '1980s', start: '1980-01-01', end: '1989-12-31'},
+  {label: '1990s', start: '1990-01-01', end: '1999-12-31'},
+  {label: '2000s', start: '2000-01-01', end: '2009-12-31'},
+  {label: '2010s', start: '2010-01-01', end: '2019-12-31'},
+  {label: '2020–2023', start: '2020-01-01', end: '2023-12-31'}
+];
+
+// Visualization params (kept simple; SPEI is standardized, center at 0)
+var vis = {
+  min: -2, max: 2,
+  palette: [
+    '4d004b','810f7c','88419d','8c6bb1','8c96c6','9ebcda','bfd3e6',
+    'e0ecf4','f7f7f7','fee0d2','fcbba1','fc9272','fb6a4a','de2d26','a50f15'
+  ]
+};
+
+// Center map and add layers per decade
+Map.centerObject(bangladesh, 7);
+Map.addLayer(bangladesh, {color: 'black'}, 'Bangladesh (AOI)', false);
+
+decades.forEach(function(d){
+  var decMean = spei
+    .filterDate(d.start, d.end)
+    .mean()
+    .clip(bangladesh);
+
+  Map.addLayer(decMean, vis, 'SPEI(12-mo) mean — ' + d.label, d.label === '2020–2023');
+
+  // Histogram for each 10-year interval (same scale)
+  var hist = ui.Chart.image.histogram({
+      image: decMean,
+      region: bangladesh,
+      scale: 55000,
+      maxBuckets: 50
+    })
+    .setOptions({
+      title: 'Histogram: 12-month SPEI — ' + d.label + ' (Bangladesh)',
+      hAxis: {title: 'SPEI (standardized)'},
+      vAxis: {title: 'Pixel count'},
+      legend: 'none'
+    });
+
+  print(hist);
+});
+
+// -------------------------
+// (Optional) Decadal mean time series of area-averaged SPEI
+// -------------------------
+// Useful if you want one datapoint per decade on a chart.
+var decadalFeatures = ee.FeatureCollection(decades.map(function(d){
+  var decMeanImg = spei.filterDate(d.start, d.end).mean();
+  var meanVal = decMeanImg.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: bangladesh,
+    scale: 55000,
+    bestEffort: true
+  }).get('SPEI_12_month');
+  return ee.Feature(null, {decade: d.label, spei_mean: meanVal});
+}));
+
+print(
+  ui.Chart.feature.byFeature({
+    features: decadalFeatures,
+    xProperty: 'decade',
+    yProperties: ['spei_mean']
+  }).setOptions({
+    title: 'Decadal mean of 12-month SPEI — Bangladesh',
+    hAxis: {title: 'Decade'},
+    vAxis: {title: 'Mean SPEI'},
+    pointSize: 6
+  })
+);
