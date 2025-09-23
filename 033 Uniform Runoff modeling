@@ -1,0 +1,89 @@
+/***********************
+ Pabna — DEM + weighted flow accumulation (HydroSHEDS)
+***********************/
+
+// Op1: Point in Pabna
+var pabna = ee.Geometry.Point(89.232, 24.006); // lon, lat
+Map.centerObject(pabna, 11);
+Map.addLayer(pabna, {color: 'red'}, 'Pabna point');
+
+// Op2: Basin (HydroBASINS level 7)
+var basins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_7');
+var basin = basins.filterBounds(pabna).first();
+var basinGeom = ee.Feature(basin).geometry();
+Map.addLayer(basinGeom, {color: '0000FF', strokeWidth: 2}, 'Containing basin');
+
+// Op3: Basin properties
+print('Basin feature:', basin);
+print('HYBAS_ID:', basin.get('HYBAS_ID'));
+print('SUB_AREA (km²):', basin.get('SUB_AREA'));
+print('UP_AREA (km²):', basin.get('UP_AREA'));
+print('NEXT_DOWN (HYBAS_ID):', basin.get('NEXT_DOWN'));
+
+// Optional: HydroATLAS attributes (level07)
+var hydroatlas = ee.FeatureCollection('WWF/HydroATLAS/v1/Basins/level07');
+var hybasId = basin.get('HYBAS_ID');
+var atlasRecord = hydroatlas.filter(ee.Filter.eq('HYBAS_ID', hybasId)).first();
+print('HydroATLAS attributes (level07):', atlasRecord);
+
+// Op4: Load DEM (NASADEM) and clip to basin
+var dem = ee.Image('NASA/NASADEM_HGT/001').select('elevation').clip(basinGeom);
+Map.addLayer(dem, {min: 0, max: 50}, 'DEM (NASADEM)');
+
+// Op5: (DEM is clipped already) — you can compute slope from this DEM
+var slope = ee.Terrain.slope(dem);
+Map.addLayer(slope, {min: 0, max: 30}, 'Slope (degrees)');
+
+// Op6: DEM details
+print('DEM projection:', dem.projection());
+print('DEM sample at point:', dem.sample(pabna, 30).first());
+
+// Op7: Flow direction (use HydroSHEDS precomputed D8) and clip
+var flowDir = ee.Image('WWF/HydroSHEDS/15DIR').select('b1').clip(basinGeom);
+Map.addLayer(flowDir, {min: 1, max: 128}, 'Flow direction (HydroSHEDS 15s)');
+
+// Op8: Flow accumulation (HydroSHEDS precomputed upstream cell counts) and clip
+var flowAcc = ee.Image('WWF/HydroSHEDS/15ACC').select('b1').clip(basinGeom);
+Map.addLayer(flowAcc, {min: 0, max: 1000}, 'Flow accumulation (HydroSHEDS 15s)');
+
+// Op9: Weighted flow accumulation -> estimate stored/accumulated runoff volume
+// Approach: volume (m³) = (upstream_cells * runoff_mm/1000) * cell_area(m²)
+// where upstream_cells is HydroSHEDS ACC (counts), runoff_mm is depth in mm, cell_area is HydroSHEDS pixel area in m²
+
+// Set runoff depth (constant) in millimeters (example: 10 mm)
+var runoff_mm = 10;
+var runoffConst = ee.Image.constant(runoff_mm);
+
+// Compute HydroSHEDS cell area image at the HydroSHEDS projection & resolution
+// pixelArea() provides area in m²; reproject it to flowAcc's projection so pixel areas align.
+var hsCellArea = ee.Image.pixelArea().reproject(flowAcc.projection());
+
+// Upstream depth (mm) at each downstream pixel = upstream_cell_count * runoff_mm
+var upstreamDepth_mm = flowAcc.multiply(runoffConst);
+
+// Convert to volume (m^3): depth (m) * area (m^2)
+// depth in m = upstreamDepth_mm / 1000
+var volume_m3 = upstreamDepth_mm.divide(1000).multiply(hsCellArea).rename('volume_m3');
+
+// Some stats / sample
+print('Runoff (mm):', runoff_mm);
+print('FlowAcc sample at point:', flowAcc.sample(pabna, 1000).first());
+print('Volume (m3) sample at point:', volume_m3.sample(pabna, 1000).first());
+
+// Visualization: log scale helps with wide dynamic range
+var volLog = volume_m3.log();
+Map.addLayer(volLog, {min: 5, max: 15, palette: ['blue', 'white', 'red']}, 'Accumulated Volume (m³) log');
+
+// Export the volume raster (use HydroSHEDS native scale)
+var outScale = flowAcc.projection().nominalScale(); // native HydroSHEDS approx scale (~500 m)
+Export.image.toDrive({
+  image: volume_m3.toFloat(),
+  description: 'Pabna_AccumulatedVolume_m3_HydroSHEDS',
+  folder: 'GEE_exports',
+  fileNamePrefix: 'Pabna_volume_m3_HydroSHEDS',
+  region: basinGeom,
+  scale: outScale,
+  maxPixels: 1e13
+});
+
+print('Done. Check Map and Console.');
