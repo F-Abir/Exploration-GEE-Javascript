@@ -1,0 +1,60 @@
+/***********************
+ Step-by-step GEE script (optimized)
+ Location: Pabna, Bangladesh
+***********************/
+
+//  Define a point in Pabna
+var pabna = ee.Geometry.Point(89.232, 24.006);  // lon, lat
+Map.centerObject(pabna, 11);
+Map.addLayer(pabna, {color: 'red'}, 'Pabna point');
+
+//  Extract the basin that contains the point (HydroBASINS, level 7)
+var basins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_7');
+var basin = basins.filterBounds(pabna).first();               
+var basinGeom = ee.Feature(basin).geometry();
+Map.addLayer(basinGeom, {color: '0000FF', strokeWidth: 2}, 'Containing basin');
+
+//  Print details of the basin
+print('Basin feature:', basin);
+print('HYBAS_ID:', basin.get('HYBAS_ID'));
+print('SUB_AREA (km²):', basin.get('SUB_AREA'));   
+print('UP_AREA (km²):', basin.get('UP_AREA'));     
+print('NEXT_DOWN (HYBAS_ID downstream):', basin.get('NEXT_DOWN'));
+
+// Extra: HydroATLAS attributes
+var hydroatlas = ee.FeatureCollection('WWF/HydroATLAS/v1/Basins/level07');
+var hybasId = basin.get('HYBAS_ID');
+var atlasRecord = hydroatlas.filter(ee.Filter.eq('HYBAS_ID', hybasId)).first();
+print('HydroATLAS attributes (level07):', atlasRecord);
+
+//  Load high-resolution DEM (Copernicus GLO-30, clipped to basin)
+var copDem = ee.ImageCollection('COPERNICUS/DEM/GLO30')
+                .filterBounds(basinGeom)   // only tiles covering basin
+                .select('DEM')
+                .mosaic()
+                .clip(basinGeom)
+                .rename('elevation');
+
+print('DEM band names:', copDem.bandNames());
+Map.addLayer(copDem, {min: 0, max: 50}, 'DEM (clipped GLO-30)');
+
+//  DEM already clipped (copDem)
+
+//  DEM band/details
+print('DEM projection:', copDem.projection());
+print('DEM sample at point:', copDem.sample(pabna, 30).first());
+
+//  Create slope (degrees)
+var slope = ee.Terrain.slope(copDem);
+Map.addLayer(slope, {min: 0, max: 30}, 'Slope (degrees)');
+
+//  Flow direction (HydroSHEDS precomputed, D8)
+var dir = ee.Image('WWF/HydroSHEDS/15DIR').select('b1');
+var dirClip = dir.clip(basinGeom);
+Map.addLayer(dirClip, {min:1, max:128}, 'Flow direction (HydroSHEDS, 15s)');
+
+//  Flow accumulation (HydroSHEDS precomputed)
+var acc = ee.Image('WWF/HydroSHEDS/15ACC').select('b1');
+var accClip = acc.clip(basinGeom);
+Map.addLayer(accClip, {min:0, max:1000}, 'Flow accumulation (HydroSHEDS, 15s)');
+
