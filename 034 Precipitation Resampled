@@ -1,0 +1,86 @@
+// ===============================
+// 1️⃣ Define your rectangle (AOI)
+// ===============================
+var rect = ee.Geometry.Rectangle([88.0, 24.3, 88.6, 24.8]);
+Map.centerObject(rect, 8);
+Map.addLayer(rect, {color: 'red'}, 'Rectangle AOI');
+
+// ===============================
+// 2️⃣ Load CHIRPS daily image
+// Example: July 1, 2020
+// ===============================
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+                .filterDate('2020-07-01', '2020-07-02')
+                .first();
+
+// Display full raster for reference
+Map.addLayer(
+  chirps,
+  {min:0, max:50, palette:['white','lightblue','blue','darkblue']},
+  'CHIRPS Raster'
+);
+
+// ===============================
+// 3️⃣ Create integer mask for pixels
+// ===============================
+var mask = chirps.gt(-9999).selfMask().int();  // 1 where CHIRPS has data
+
+// ===============================
+// 4️⃣ Convert pixels touching rectangle to polygons
+// ===============================
+var pixelPolygons = mask.reduceToVectors({
+  geometry: rect,
+  geometryType: 'polygon',
+  scale: chirps.projection().nominalScale(),
+  bestEffort: true,
+  maxPixels: 1e13
+});
+
+// ===============================
+// 5️⃣ Mask CHIRPS to only include pixels touching rectangle
+// ===============================
+var pixelMask = ee.Image().byte().paint(pixelPolygons, 1).selfMask(); // 1 for pixels
+var chirpsPixels = chirps.updateMask(pixelMask);
+
+// ===============================
+// 6️⃣ Add DEM (NASADEM) and visualize
+// ===============================
+var dem = ee.Image('NASA/NASADEM_HGT/001').select('elevation');
+Map.addLayer(
+  dem.clip(rect),
+  {min:0, max:100, palette:['white','yellow','brown']},
+  'NASADEM Elevation'
+);
+
+// ===============================
+// 7️⃣ Resample CHIRPS to DEM resolution
+// ===============================
+var chirpsResampled = chirpsPixels
+  .resample('bilinear')                       // smooth interpolation
+  .reproject({                               // match DEM projection
+    crs: dem.projection(),
+    scale: dem.projection().nominalScale()
+  });
+
+Map.addLayer(
+  chirpsResampled.clip(rect),
+  {min:0, max:50, palette:['white','lightblue','blue','darkblue']},
+  'CHIRPS Resampled to DEM'
+);
+
+// ===============================
+// 8️⃣ Print resolutions
+// ===============================
+print('CHIRPS original pixel size (m):', chirps.projection().nominalScale());
+print('DEM pixel size (m):', dem.projection().nominalScale());
+print('CHIRPS resampled pixel size (m):', chirpsResampled.projection().nominalScale());
+
+// ===============================
+// 9️⃣ Optional: Print FeatureCollection of pixel values
+// ===============================
+var pixels = chirps.sampleRegions({
+  collection: pixelPolygons,
+  scale: chirps.projection().nominalScale(),
+  geometries: true
+});
+print('Original CHIRPS pixel values for rectangle:', pixels);
