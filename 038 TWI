@@ -1,0 +1,143 @@
+/******************************************************
+ * GEE JavaScript: TWI (Topographic Wetness Index) - FIXED
+ * Final: use scalar images for neighborhoodToArray (no .toArray())
+ ******************************************************/
+
+// ---------- PARAMETERS ----------
+var demSource = ee.Image('USGS/SRTMGL1_003'); // SRTM 30m resolution
+var region = ee.Geometry.Rectangle([90.35, 23.70, 90.50, 23.85]); // Dhaka area example
+var scale = 30; // 30m resolution
+
+// ---------- LOAD DEM & basic preprocessing ----------
+var dem = demSource.select('elevation').clip(region).toFloat();
+
+// Optional: simple sink fill using focal operations
+function fillSinks(img, radius, iterations) {
+  radius = radius || 1;
+  iterations = iterations || 2;
+  var filled = img;
+  for (var i = 0; i < iterations; i++) {
+    var minf = filled.focal_min(radius, 'circle', 'pixels');
+    var maxf = minf.focal_max(radius, 'circle', 'pixels');
+    filled = filled.where(maxf.gt(filled), maxf);
+  }
+  return filled;
+}
+var demFilled = fillSinks(dem, 1, 3).toFloat();
+
+// ---------- Slope (radians) ----------
+var slopeDeg = ee.Terrain.slope(demFilled);
+var slopeRad = slopeDeg.multiply(Math.PI).divide(180);
+var minSlope = 0.001;
+slopeRad = slopeRad.max(minSlope);
+
+// ---------- D8 Flow Direction ----------
+var neighbors = [
+  {name: 'E',  x: 1,  y: 0,  dist: scale, code: 1},
+  {name: 'SE', x: 1,  y: 1,  dist: scale * Math.sqrt(2), code: 2},
+  {name: 'S',  x: 0,  y: 1,  dist: scale, code: 3},
+  {name: 'SW', x: -1, y: 1,  dist: scale * Math.sqrt(2), code: 4},
+  {name: 'W',  x: -1, y: 0,  dist: scale, code: 5},
+  {name: 'NW', x: -1, y: -1, dist: scale * Math.sqrt(2), code: 6},
+  {name: 'N',  x: 0,  y: -1, dist: scale, code: 7},
+  {name: 'NE', x: 1,  y: -1, dist: scale * Math.sqrt(2), code: 8}
+];
+
+// Kernel for 3x3 neighborhood
+var kernel3 = ee.Kernel.square(1);
+
+// Use neighborhoodToArray on scalar single-band image: returns 2D array [rows, cols]
+var elevArr = demFilled.neighborhoodToArray(kernel3);
+
+// Helper: get neighbor element by xOff,yOff for scalar image
+function getNeighborByOffsetScalar(imgArr, xOff, yOff) {
+  var row = yOff + 1; // 0..2
+  var col = xOff + 1; // 0..2
+  return imgArr.arrayGet([row, col]); // [row, col] for scalar-image neighborhood
+}
+
+// Center pixel elevation
+var center = getNeighborByOffsetScalar(elevArr, 0, 0);
+var dropImages = [];
+var codeList = [];
+
+for (var i = 0; i < neighbors.length; i++) {
+  var n = neighbors[i];
+  var nb = getNeighborByOffsetScalar(elevArr, n.x, n.y);
+  var drop = center.subtract(nb).divide(n.dist);
+  var dropPos = drop.where(drop.lte(0), -9999);
+  dropImages.push(dropPos.rename('d' + n.code));
+  codeList.push(n.code);
+}
+
+var dropStack = ee.Image.cat(dropImages);
+var maxDrop = dropStack.reduce(ee.Reducer.max());
+
+var flowDir = ee.Image.constant(0).clip(region);
+for (var j = 0; j < dropImages.length; j++) {
+  var mask = dropImages[j].eq(maxDrop);
+  flowDir = flowDir.where(mask, codeList[j]);
+}
+flowDir = flowDir.rename('flowDir').clip(region);
+
+// ---------- Flow accumulation using scalar neighborhood arrays ----------
+function accumulateFlowScalar(flowDirection, iterations) {
+  iterations = iterations || 30;
+  var accum = ee.Image.constant(1).toFloat().clip(region); // start with 1 (self)
+  
+  // Upstream offsets for each D8 code (the neighbor that contributes to center)
+  var upstreamOffset = {
+    1: [-1,  0], // E  <- W
+    2: [-1, -1], // SE <- NW
+    3: [ 0, -1], // S  <- N
+    4: [ 1, -1], // SW <- NE
+    5: [ 1,  0], // W  <- E
+    6: [ 1,  1], // NW <- SE
+    7: [ 0,  1], // N  <- S
+    8: [-1,  1]  // NE <- SW
+  };
+  
+  for (var iter = 0; iter < iterations; iter++) {
+    // accum is scalar; neighborhoodToArray returns 2D array [rows, cols]
+    var accumArray = accum.neighborhoodToArray(kernel3);
+    var routed = ee.Image.constant(0).toFloat().clip(region);
+    
+    for (var code = 1; code <= 8; code++) {
+      var mask = flowDirection.eq(code);
+      var offs = upstreamOffset[code];
+      var ux = offs[0];
+      var uy = offs[1];
+      var row = uy + 1;
+      var col = ux + 1;
+      
+      // For scalar accumArray use [row, col]
+      var contribution = accumArray.arrayGet([row, col]).toFloat();
+      var contributionMasked = contribution.updateMask(mask);
+      routed = routed.add(contributionMasked.unmask(0));
+    }
+    
+    accum = accum.add(routed);
+  }
+  
+  return accum;
+}
+
+var flowAccum = accumulateFlowScalar(flowDir, 50).rename('flowAccum').clip(region);
+var specificArea = flowAccum.multiply(scale).rename('As');
+var twi = specificArea.divide(slopeRad.tan()).log().rename('TWI');
+var twiMasked = twi.updateMask(twi.gt(-20).and(twi.lt(30)));
+
+// ---------- VISUALIZATION ----------
+var demVis = {min: 0, max: 300, palette: ['#f7fbff','#c6dbef','#6baed6','#2171b5']};
+var twiVis = {min: 0, max: 20, palette: ['#ffffcc','#c2e699','#78c679','#31a354','#006837']};
+var accumVis = {min: 1, max: 1000, palette: ['#000000','#0000ff','#00ffff','#ffff00','#ffffff']};
+
+Map.centerObject(region, 12);
+Map.addLayer(dem, demVis, 'DEM (original)', false);
+Map.addLayer(demFilled, demVis, 'DEM (filled)', false);
+Map.addLayer(flowAccum, accumVis, 'Flow Accumulation', false);
+Map.addLayer(specificArea, {min:90, max:9000, palette:['#ffffff','#ccffcc','#66cc66','#006600']}, 'Specific Area (m)', false);
+Map.addLayer(twiMasked, twiVis, 'TWI', true);
+
+var flowDirVis = {min: 0, max: 8, palette: ['#000000','#ff0000','#ff8000','#ffff00','#80ff00','#00ff00','#00ff80','#00ffff','#0080ff']};
+Map.addLayer(flowDir.updateMask(flowDir.gt(0)), flowDirVis, 'Flow Direction', false);
