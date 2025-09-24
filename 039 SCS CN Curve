@@ -1,0 +1,258 @@
+// ============================================================================
+// SCS-CURVE NUMBER RUNOFF CALCULATION IN GOOGLE EARTH ENGINE
+// ============================================================================
+
+// Define your area of interest (AOI)
+var aoi = ee.Geometry.Rectangle([-122.3, 37.5, -122.1, 37.7]); // San Francisco Bay Area
+Map.centerObject(aoi, 10);
+
+// Define rainfall data (using CHIRPS daily precipitation)
+var startDate = '2023-01-01';
+var endDate = '2023-01-02';
+var rainfall = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterDate(startDate, endDate)
+  .filterBounds(aoi)
+  .sum()
+  .clip(aoi)
+  .rename('rainfall'); // Rename the band for consistency
+
+print('Rainfall Image:', rainfall);
+print('Rainfall band names:', rainfall.bandNames());
+
+// Step 1: Get Land Use/Land Cover Data (ESA WorldCover)
+var landCover = ee.Image('ESA/WorldCover/v200/2021')
+  .clip(aoi)
+  .rename('landcover'); // Rename the band
+
+print('Land Cover Image:', landCover);
+print('Land Cover band names:', landCover.bandNames());
+
+// Step 2: Assign Curve Numbers based on Land Cover
+var assignCurveNumber = function(landCoverImg) {
+  // Assign base CN values for each land cover type (for HSG B - average condition)
+  var cnImage = landCoverImg
+    .remap([10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100], 
+           [55, 45, 65, 75, 90, 85, 70, 98, 75, 80, 65],
+           70) // Default value for any unmapped classes
+    .rename('curve_number');
+  
+  return cnImage.clamp(30, 100); // Ensure CN stays within valid range
+};
+
+var curveNumber = assignCurveNumber(landCover);
+print('Curve Number Image:', curveNumber);
+print('Curve Number band names:', curveNumber.bandNames());
+
+// Step 3: Calculate Composite CN for the watershed
+var compositeCN = curveNumber.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: aoi,
+  scale: 100,
+  maxPixels: 1e9
+}).get('curve_number'); // Use the correct band name
+
+print('Composite Curve Number for Watershed:', compositeCN);
+
+// Step 4: Calculate rainfall statistics
+var rainfallStats = rainfall.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: aoi,
+  scale: 100,
+  maxPixels: 1e9
+}).get('rainfall'); // Use the correct band name
+
+print('Average Rainfall (mm):', rainfallStats);
+
+// Step 5: Calculate runoff using SCS-CN method (PIXEL-BASED APPROACH)
+var calculateRunoff = function(rainfallImg, cnImg) {
+  // Calculate S for each pixel (in mm)
+  var S = ee.Image.constant(25400).divide(cnImg).subtract(254);
+  
+  // Calculate Ia for each pixel
+  var Ia = S.multiply(0.2);
+  
+  var P = rainfallImg; // Rainfall in mm
+  
+  // SCS-CN runoff equation: Q = (P - Ia)^2 / (P - Ia + S) for P > Ia
+  var condition = P.gt(Ia);
+  
+  var numerator = P.subtract(Ia).pow(2);
+  var denominator = P.subtract(Ia).add(S);
+  var Q = numerator.divide(denominator);
+  
+  return Q.where(condition.not(), 0) // Set to 0 where P <= Ia
+          .rename('runoff_depth');
+};
+
+var runoff = calculateRunoff(rainfall, curveNumber);
+print('Runoff Image:', runoff);
+print('Runoff band names:', runoff.bandNames());
+
+// Step 6: Calculate Runoff Volume
+var areaSqM = aoi.area(); // Area in square meters
+var runoffVolume = runoff.multiply(areaSqM).divide(1000); // Convert to cubic meters
+
+// Get total volume for the watershed
+var totalVolume = runoffVolume.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: aoi,
+  scale: 100,
+  maxPixels: 1e9
+}).get('runoff_depth'); // Use the correct band name
+
+print('Total Runoff Volume (m³):', totalVolume);
+
+// Step 7: Calculate runoff statistics
+var runoffStats = runoff.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: aoi,
+  scale: 100,
+  maxPixels: 1e9
+}).get('runoff_depth'); // Use the correct band name
+
+print('Average Runoff Depth (mm):', runoffStats);
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+
+// Create visualization parameters
+var landCoverVis = {
+  min: 10, 
+  max: 100, 
+  palette: ['006400', 'ffbb22', 'ffff4c', 'f096ff', 'fa0000', 
+           'b4b4b4', 'f0f0f0', '0064c8', '00cf75', 'fae6a0', 'fa0000']
+};
+
+var cnVis = {
+  min: 30, 
+  max: 100, 
+  palette: ['blue', 'green', 'yellow', 'orange', 'red']
+};
+
+var rainfallVis = {
+  min: 0, 
+  max: 50, 
+  palette: ['white', 'lightblue', 'blue', 'darkblue']
+};
+
+var runoffVis = {
+  min: 0, 
+  max: 25, 
+  palette: ['white', 'lightgreen', 'green', 'darkgreen', 'red']
+};
+
+// Add layers to the map
+Map.addLayer(landCover, landCoverVis, 'Land Cover');
+Map.addLayer(curveNumber, cnVis, 'Curve Number');
+Map.addLayer(rainfall, rainfallVis, 'Rainfall (mm)');
+Map.addLayer(runoff, runoffVis, 'Runoff Depth (mm)');
+
+// ============================================================================
+// SIMPLE CALCULATION (Using numbers instead of images)
+// ============================================================================
+
+// Alternative method: Calculate using simple numbers
+var calculateSimpleRunoff = function(P, CN) {
+  // Convert to numbers
+  P = ee.Number(P);
+  CN = ee.Number(CN);
+  
+  // Calculate S and Ia
+  var S = ee.Number(25400).divide(CN).subtract(254);
+  var Ia = S.multiply(0.2);
+  
+  print('=== SIMPLE CALCULATION ===');
+  print('Rainfall (P):', P);
+  print('Curve Number (CN):', CN);
+  print('Retention (S):', S);
+  print('Initial Abstraction (Ia):', Ia);
+  
+  // Check if runoff occurs
+  if (P.gt(Ia).getInfo()) {
+    var numerator = P.subtract(Ia).pow(2);
+    var denominator = P.subtract(Ia).add(S);
+    var Q = numerator.divide(denominator);
+    print('Runoff occurs: P > Ia');
+    print('Runoff Depth (Q):', Q);
+    return Q;
+  } else {
+    print('No runoff: P <= Ia');
+    return ee.Number(0);
+  }
+};
+
+// Get average rainfall and CN as numbers
+var avgRainfall = ee.Number(rainfallStats);
+var avgCN = ee.Number(compositeCN);
+
+// Calculate simple runoff
+var simpleRunoff = calculateSimpleRunoff(avgRainfall, avgCN);
+
+// ============================================================================
+// RESULTS SUMMARY
+// ============================================================================
+
+print('=== SCS-CN METHOD RESULTS SUMMARY ===');
+print('1. Watershed Characteristics:');
+print('   - Area:', aoi.area().divide(10000).getInfo(), 'hectares');
+print('   - Average Curve Number:', compositeCN.getInfo());
+print('   - Average Rainfall:', avgRainfall.getInfo(), 'mm');
+
+print('2. Runoff Results:');
+print('   - Average Runoff Depth:', runoffStats.getInfo(), 'mm');
+print('   - Total Runoff Volume:', totalVolume.getInfo(), 'cubic meters');
+print('   - Simple Calculation Result:', simpleRunoff.getInfo(), 'mm');
+
+// Calculate runoff coefficient
+var runoffCoefficient = ee.Number(runoffStats).divide(avgRainfall).getInfo();
+print('3. Runoff Coefficient:', runoffCoefficient);
+
+// ============================================================================
+// CHART VISUALIZATION
+// ============================================================================
+
+// Create a chart of CN distribution
+var cnHistogram = ui.Chart.image.histogram({
+  image: curveNumber,
+  region: aoi,
+  scale: 100,
+  minBucketWidth: 5,
+  maxRaw: 100
+}).setOptions({
+  title: 'Curve Number Distribution',
+  hAxis: {title: 'Curve Number'},
+  vAxis: {title: 'Pixel Count'},
+  colors: ['#FF6B00']
+});
+
+print(cnHistogram);
+
+// Create land cover pie chart
+var landCoverArea = landCover.reduceRegion({
+  reducer: ee.Reducer.frequencyHistogram(),
+  geometry: aoi,
+  scale: 100,
+  maxPixels: 1e9
+}).get('landcover'); // Use the correct band name
+
+print('Land Cover Area Distribution:', landCoverArea);
+
+// Convert to chart
+var landCoverDict = ee.Dictionary(landCoverArea);
+var landCoverChart = ui.Chart.array.values({
+  array: ee.Array(landCoverDict.values()),
+  axis: 0,
+  xLabels: landCoverDict.keys()
+}).setChartType('PieChart')
+.setOptions({
+  title: 'Land Cover Distribution',
+  slices: [{color: '#006400'}, {color: '#ffbb22'}, {color: '#ffff4c'}, 
+          {color: '#f096ff'}, {color: '#fa0000'}, {color: '#b4b4b4'}],
+  sliceVisibilityThreshold: 0
+});
+
+print(landCoverChart);
+
+print('=== ANALYSIS COMPLETE ===');
+print('Check the map layers and console for results.');
