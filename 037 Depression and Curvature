@@ -1,0 +1,94 @@
+// ==============================
+// Plan Curvature & Depression Depth (GEE)
+// ==============================
+
+// ---------- AOI (edit this) ----------
+var aoi = /* your geometry here */ ee.Geometry.Rectangle([88.9, 21.8, 92.7, 25.9]); // Bangladesh-ish bbox
+// If you have your own asset (uncomment & edit):
+// var admin = ee.FeatureCollection('projects/ee-abirnahraf/assets/Admin');
+// var aoi = admin.filter(ee.Filter.eq('Upazila', 'Dumki')).geometry();
+
+Map.centerObject(aoi, 9);
+
+// ---------- DEM (SRTM 30 m) ----------
+var dem = ee.Image('USGS/SRTMGL1_003').clip(aoi);
+// Work in a metric projection to keep derivatives meaningful
+var scale = 30; // meters
+var demM = dem.reproject({crs: 'EPSG:3857', scale: scale});
+
+// ---------- PLAN CURVATURE (Evans, 1980) ----------
+// First derivatives (p, q)
+var grad = demM.gradient();              // bands: 'x', 'y'
+var p = grad.select('x');                // ∂z/∂x
+var q = grad.select('y');                // ∂z/∂y
+
+// Second derivatives (r, s, t)
+// r = ∂²z/∂x²  (x-derivative of p)
+// s = ∂²z/∂x∂y (mixed; average of p_y and q_x)
+// t = ∂²z/∂y²  (y-derivative of q)
+var pp = p.gradient();                   // bands: 'x','y' over p
+var qq = q.gradient();                   // bands: 'x','y' over q
+var r = pp.select('x');
+var t = qq.select('y');
+
+// Mixed derivative: average of (∂p/∂y) and (∂q/∂x)
+var py = pp.select('y');
+var qx = qq.select('x');
+var s = py.add(qx).multiply(0.5);
+
+// Plan curvature:
+// k_plan = (q^2 r - 2 p q s + p^2 t) / (p^2 + q^2)^(3/2)
+var eps = ee.Image.constant(1e-6);
+var num = q.pow(2).multiply(r)
+  .subtract(ee.Image(2).multiply(p).multiply(q).multiply(s))
+  .add(p.pow(2).multiply(t));
+var den = p.pow(2).add(q.pow(2)).pow(1.5).add(eps);
+var k_plan = num.divide(den).rename('k_plan');
+
+// Optional mask to avoid noisy flats (very tiny slopes)
+var slopeMag = p.hypot(q);
+k_plan = k_plan.updateMask(slopeMag.gt(1e-5));
+
+// ---------- DEPRESSION DEPTH (DEM-fill residual) ----------
+// Use ee.Terrain.fillMinima (fills local minima; requires INT types).
+// We scale elevations to preserve decimals, cast to Int, fill, then scale back.
+var demScaledInt = demM.multiply(10).toInt();   // preserve 0.1 m resolution
+// neighborhood=100 ~ 100 pixels (~3 km in EPSG:3857 at 30 m) — adjust if needed
+var demFilledInt = ee.Terrain.fillMinima(demScaledInt, null, 100);
+var demFilled = demFilledInt.toFloat().divide(10);
+
+// Residual depression depth (filled - original), force non-negative
+var depDepth = demFilled.subtract(demM).max(0).rename('depression_depth');
+
+// ---------- Visualization ----------
+var curvVis = {min: -0.5, max: 0.5, palette: [
+  '2b83ba','abdda4','ffffbf','fdae61','d7191c'  // blue→white→red
+]}; // negative (concave) → blue; positive (convex) → red
+
+var depVis = {min: 0, max: 3, palette: ['ffffff','c7e9b4','7fcdbb','41b6c4','1d91c0','225ea8','0c2c84']};
+
+Map.addLayer(k_plan.clip(aoi), curvVis, 'Plan curvature (concave -, convex +)');
+Map.addLayer(depDepth.clip(aoi), depVis, 'Depression depth (m)');
+Map.addLayer(demM.clip(aoi), {min: 0, max: 100, palette: ['fffde7','d9f0a3','78c679','238443']}, 'DEM (low→high)', false);
+Map.addLayer(aoi, {color: 'black'}, 'AOI', false);
+
+// ---------- Exports (edit description/folder) ----------
+Export.image.toDrive({
+  image: k_plan.clip(aoi),
+  description: 'PlanCurvature_kplan_30m',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'plan_curvature_kplan_30m',
+  region: aoi,
+  scale: scale,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: depDepth.clip(aoi),
+  description: 'DepressionDepth_Residual_30m',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'depression_depth_residual_30m',
+  region: aoi,
+  scale: scale,
+  maxPixels: 1e13
+});
