@@ -1,0 +1,187 @@
+/*******************************************************
+ CHIRPS → Pixel-by-Pixel Return Period Maps
+ Generates return period precipitation maps for each pixel
+********************************************************/
+
+// =============== USER INPUTS ==========================
+var START_YEAR = 1981;
+var END_YEAR   = 2024;              // inclusive
+
+// Study area - define your region of interest
+var AOI = ee.Geometry.Rectangle([88, 22, 91, 24]); // Bangladesh region example
+// var AOI = ee.FeatureCollection('UCSB/FIRP/2019').first().geometry(); // or use admin boundaries
+
+// Return periods of interest
+var T_LIST = [2, 5, 10, 25, 50, 100];
+
+// =============== LOAD CHIRPS DAILY ====================
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterDate(ee.Date.fromYMD(START_YEAR,1,1), ee.Date.fromYMD(END_YEAR+1,1,1))
+  .filterBounds(AOI)
+  .select('precipitation');
+
+print('CHIRPS images count:', chirps.size());
+Map.centerObject(AOI, 8);
+Map.addLayer(AOI, {color:'yellow'}, 'Study Area');
+
+// =============== ANNUAL MAXIMA SERIES (AMS) PER PIXEL =======
+var years = ee.List.sequence(START_YEAR, END_YEAR);
+
+// Create annual maximum images for each year
+var annualMaxImages = years.map(function(year) {
+  var start = ee.Date.fromYMD(ee.Number(year), 1, 1);
+  var end = start.advance(1, 'year');
+  
+  var yearlyMax = chirps
+    .filterDate(start, end)
+    .max()
+    .set('year', year);
+    
+  return yearlyMax;
+});
+
+var annualMaxCollection = ee.ImageCollection.fromImages(annualMaxImages);
+
+print('Annual max images:', annualMaxCollection.size());
+
+// =============== CALCULATE GUMBEL PARAMETERS PER PIXEL =======
+// Calculate mean and standard deviation across all years for each pixel
+var meanImage = annualMaxCollection.mean().rename('mean');
+var stdImage = annualMaxCollection.reduce(ee.Reducer.stdDev()).rename('stdDev');
+var countImage = annualMaxCollection.count().rename('count');
+
+// Gumbel distribution parameters
+var euler = 0.5772156649015329;
+var beta = stdImage.multiply(Math.sqrt(6)).divide(Math.PI);
+var mu = meanImage.subtract(beta.multiply(euler));
+
+// Create parameter stack
+var gumbelParams = ee.Image.cat([mu, beta, meanImage, stdImage, countImage])
+  .rename(['mu', 'beta', 'mean', 'stdDev', 'count']);
+
+print('Gumbel parameters computed');
+
+// =============== CALCULATE RETURN PERIOD MAPS ===============
+function calculateReturnLevel(T, params) {
+  var mu = params.select('mu');
+  var beta = params.select('beta');
+  
+  // Return level formula: xT = mu - beta * ln(-ln(1 - 1/T))
+  var prob = ee.Image(1).subtract(ee.Image(1).divide(T));
+  var term = prob.log().multiply(-1).log();
+  var returnLevel = mu.subtract(beta.multiply(term));
+  
+  return returnLevel.rename('T' + T + '_year');
+}
+
+// Generate return period images
+var returnPeriodImages = T_LIST.map(function(T) {
+  return calculateReturnLevel(T, gumbelParams);
+});
+
+var returnPeriodStack = ee.Image.cat(returnPeriodImages);
+
+print('Return period maps generated:', returnPeriodStack.bandNames());
+
+// =============== VISUALIZATION ==========================
+// Color palette for precipitation (blue to red)
+var precipPalette = ['#000080', '#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF8000', '#FF0000', '#800000'];
+
+// Visualize some return period maps
+var visParams = {
+  min: 50,
+  max: 200,
+  palette: precipPalette
+};
+
+Map.addLayer(returnPeriodStack.select('T2_year'), visParams, '2-Year Return Period');
+Map.addLayer(returnPeriodStack.select('T10_year'), visParams, '10-Year Return Period');
+Map.addLayer(returnPeriodStack.select('T25_year'), visParams, '25-Year Return Period');
+
+// Add mean annual maximum for reference
+Map.addLayer(meanImage, visParams, 'Mean Annual Maximum');
+
+// =============== EXPORT RETURN PERIOD MAPS ==============
+// Export individual return period maps
+T_LIST.forEach(function(T) {
+  Export.image.toDrive({
+    image: returnPeriodStack.select('T' + T + '_year'),
+    description: 'CHIRPS_ReturnPeriod_' + T + 'yr_' + START_YEAR + '_' + END_YEAR,
+    folder: 'CHIRPS_ReturnPeriods',
+    region: AOI,
+    scale: 5000, // CHIRPS native resolution
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+});
+
+// Export complete stack
+Export.image.toDrive({
+  image: returnPeriodStack,
+  description: 'CHIRPS_AllReturnPeriods_' + START_YEAR + '_' + END_YEAR,
+  folder: 'CHIRPS_ReturnPeriods',
+  region: AOI,
+  scale: 5000,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// Export Gumbel parameters for validation
+Export.image.toDrive({
+  image: gumbelParams,
+  description: 'CHIRPS_GumbelParams_' + START_YEAR + '_' + END_YEAR,
+  folder: 'CHIRPS_ReturnPeriods',
+  region: AOI,
+  scale: 5000,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// =============== VALIDATION TOOLS =======================
+// Sample points for validation (optional)
+var samplePoints = ee.FeatureCollection.randomPoints({
+  region: AOI,
+  points: 10,
+  seed: 42
+});
+
+// Extract return period values at sample points
+var sampledData = returnPeriodStack.sampleRegions({
+  collection: samplePoints,
+  properties: [],
+  scale: 5000,
+  geometries: true
+});
+
+print('Sample validation points:', sampledData.limit(3));
+
+// Export sample data for validation
+Export.table.toDrive({
+  collection: sampledData,
+  description: 'CHIRPS_ReturnPeriod_SamplePoints_' + START_YEAR + '_' + END_YEAR,
+  folder: 'CHIRPS_ReturnPeriods',
+  fileFormat: 'CSV'
+});
+
+// =============== STATISTICS SUMMARY =====================
+// Calculate regional statistics
+var stats = returnPeriodStack.reduceRegion({
+  reducer: ee.Reducer.mean().combine({
+    reducer2: ee.Reducer.minMax(),
+    sharedInputs: true
+  }),
+  geometry: AOI,
+  scale: 5000,
+  maxPixels: 1e13,
+  bestEffort: true
+});
+
+print('Regional Return Period Statistics:', stats);
+
+// =============== NOTES ===============================
+print('NOTES:');
+print('• Each pixel now has return period values for T =', T_LIST, 'years');
+print('• Exported as individual GeoTIFF files and combined stack');
+print('• Use the sample points CSV to validate against gauge data');
+print('• Consider masking areas with insufficient data quality');
+print('• CHIRPS resolution: ~5.5km, good for regional analysis');
