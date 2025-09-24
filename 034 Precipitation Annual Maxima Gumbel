@@ -1,0 +1,186 @@
+/*******************************************************
+ CHIRPS → Annual Maxima → Gumbel (EV1) Return Periods
+********************************************************/
+
+// =============== USER INPUTS ==========================
+var START_YEAR = 1981;
+var END_YEAR   = 2024;              // inclusive
+var USE_AREA_MEAN = true;           // true = area mean, false = nearest pixel
+
+// Example AOI (Point). Replace with your site or polygon
+var AOI = ee.Geometry.Point([89.502, 22.809]);
+// var AOI = ee.Geometry.Polygon([...]);
+
+// Return periods of interest
+var T_LIST = [2, 5, 10, 25, 50, 100];
+
+// Reducer when AOI is polygon
+var SPATIAL_REDUCER = ee.Reducer.mean();
+
+// =============== LOAD CHIRPS DAILY ====================
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterDate(ee.Date.fromYMD(START_YEAR,1,1), ee.Date.fromYMD(END_YEAR+1,1,1))
+  .filterBounds(AOI)
+  .select('precipitation');   // mm/day
+
+print('CHIRPS images count:', chirps.size());
+Map.centerObject(AOI, 7);
+Map.addLayer(AOI, {color:'yellow'}, 'AOI');
+
+// =============== ANNUAL MAXIMA SERIES (AMS) ===========
+var years = ee.List.sequence(START_YEAR, END_YEAR);
+
+var amsFC = ee.FeatureCollection(
+  years.map(function(y){
+    y = ee.Number(y);
+    var start = ee.Date.fromYMD(y,1,1);
+    var end   = start.advance(1, 'year');
+
+    var yearlyMax = chirps.filterDate(start, end).max();
+
+    var value = ee.Algorithms.If(
+      USE_AREA_MEAN,
+      yearlyMax.reduceRegion({
+        reducer: SPATIAL_REDUCER,
+        geometry: AOI,
+        scale: 5000,
+        bestEffort: true,
+        maxPixels: 1e13
+      }).get('precipitation'),
+      yearlyMax.sample({
+        region: AOI,
+        scale: 5000,
+        numPixels: 1,
+        geometries: false
+      }).first().get('precipitation')
+    );
+
+    return ee.Feature(null, {
+      'year': y,
+      'annual_max_mm': value
+    });
+  })
+).filter(ee.Filter.notNull(['annual_max_mm']));
+
+print('Annual Maxima Series (AMS):', amsFC.limit(5));
+
+// Export AMS table
+Export.table.toDrive({
+  collection: amsFC,
+  description: 'CHIRPS_AMS_'+START_YEAR+'_'+END_YEAR,
+  fileFormat: 'CSV'
+});
+
+// =============== GUMBEL (EV1) FIT =====================
+var reducer = ee.Reducer.mean()
+  .combine({reducer2: ee.Reducer.stdDev(), sharedInputs: true})
+  .combine({reducer2: ee.Reducer.count(),  sharedInputs: true});
+
+var colStats = amsFC.reduceColumns(reducer, ['annual_max_mm']);
+
+var xbar = ee.Number(colStats.get('mean'));
+var s    = ee.Number(colStats.get('stdDev'));
+var n    = ee.Number(colStats.get('count'));
+
+print('AMS stats → mean, stdDev, count:', xbar, s, n);
+
+var ok = n.gte(2).and(s.gt(0));
+print('Proceed with Gumbel fit?', ok);
+
+// Parameters
+var euler = ee.Number(0.5772156649015329);
+var beta  = ee.Number(ee.Algorithms.If(ok, s.multiply(Math.sqrt(6)).divide(Math.PI), null));
+var mu    = ee.Number(ee.Algorithms.If(ok, xbar.subtract(euler.multiply(beta)), null));
+
+print('Gumbel parameters:', {mu: mu, beta: beta});
+
+// Return level formula
+function gumbelReturnLevel(T, mu_, beta_) {
+  T = ee.Number(T);
+  var pNonExc = ee.Number(1).subtract(ee.Number(1).divide(T));
+  var term = pNonExc.log().multiply(-1).log();
+  return ee.Number(mu_).subtract(ee.Number(beta_).multiply(term));
+}
+
+// Build RP FeatureCollection
+var rpList = ee.List(T_LIST).map(function(T){
+  return ee.Feature(null, {
+    'T_years': T,
+    'xT_mm': ee.Algorithms.If(ok, gumbelReturnLevel(T, mu, beta), null)
+  });
+});
+
+var rpFC = ee.FeatureCollection(rpList)
+              .filter(ee.Filter.notNull(['xT_mm']));
+
+print('Gumbel Return Period Table:', rpFC);
+
+// Export RP table
+Export.table.toDrive({
+  collection: rpFC,
+  description: 'Gumbel_Return_Levels_'+START_YEAR+'_'+END_YEAR,
+  fileFormat: 'CSV'
+});
+
+// =============== EMPIRICAL WEIBULL ====================
+var sortedAMS = amsFC.sort('annual_max_mm', false).toList(amsFC.size());
+
+// FIX: Handle the conditional FeatureCollection creation properly
+var empList = ee.Algorithms.If(
+  n.gte(2),
+  ee.List.sequence(1, n).map(function(rank){
+    rank = ee.Number(rank);
+    var f = ee.Feature(sortedAMS.get(rank.subtract(1)));
+    var value = ee.Number(f.get('annual_max_mm'));
+    var prob = rank.divide(n.add(1));
+    var T = ee.Number(1).divide(ee.Number(1).subtract(prob));
+    return ee.Feature(null, {'T_years': T, 'xT_mm': value});
+  }),
+  ee.List([]) // empty list if not enough data
+);
+
+// Convert the conditional list to FeatureCollection
+var empFC = ee.FeatureCollection(ee.List(empList));
+
+print('Empirical Weibull Table:', empFC);
+
+// =============== CHARTS ===============================
+// Chart 1: AMS
+var amsChart = ui.Chart.feature.byFeature(amsFC, 'year', 'annual_max_mm')
+  .setChartType('ColumnChart')
+  .setOptions({
+    title: 'Annual Maximum Daily Rainfall (CHIRPS)',
+    hAxis: {title: 'Year'},
+    vAxis: {title: 'Max Daily Rainfall (mm)'},
+    legend: 'none'
+  });
+print(amsChart);
+
+// Label collections
+var rpFC_labeled  = rpFC.map(function(f){return f.set('source','Gumbel');});
+var empFC_labeled = empFC.map(function(f){return f.set('source','Empirical');});
+
+// Chart 2: Frequency curve
+var freqChart = ui.Chart.feature.groups({
+    features: rpFC_labeled.merge(empFC_labeled),
+    xProperty: 'T_years',
+    yProperty: 'xT_mm',
+    seriesProperty: 'source'
+  })
+  .setChartType('ScatterChart')
+  .setOptions({
+    title: 'Rainfall Frequency Curve (Gumbel vs Empirical)',
+    hAxis: {title: 'Return Period (years)', logScale: true},
+    vAxis: {title: 'Rainfall (mm)'},
+    pointSize: 5,
+    lineWidth: 2
+  });
+
+print(freqChart);
+
+// =============== NOTES ===============================
+// • FIXED: empFC now properly handles conditional list creation
+// • The issue was ee.Algorithms.If() returning List<Feature> directly to ee.FeatureCollection()
+// • Now we first create the conditional list, then wrap it in ee.FeatureCollection()
+// • Cross-check with IDF curves/gauge data for bias.
+// • Extrapolation beyond ~2–3× record length is uncertain.
