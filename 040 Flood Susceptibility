@@ -1,0 +1,158 @@
+// =========================
+// ROI from FAO GAUL (Habiganj)
+// =========================
+var gaul2 = ee.FeatureCollection('FAO/GAUL/2015/level2');
+var ROI1 = gaul2
+  .filter(ee.Filter.eq('ADM0_NAME', 'Bangladesh'))
+  .filter(ee.Filter.eq('ADM2_NAME', 'Habiganj'))
+  .geometry();
+
+Map.centerObject(ROI1, 10);
+Map.addLayer(ROI1, {color: 'yellow'}, 'ROI: Habiganj (FAO GAUL)');
+
+// =========================
+// Datasets & visualization
+// =========================
+var gsw  = ee.Image('JRC/GSW1_4/GlobalSurfaceWater');   // Water occurrence
+var srtm = ee.Image('USGS/SRTMGL1_003');                // DEM (SRTM 30 m)
+
+var visRGB   = {bands: ['B4','B3','B2'], min: 0, max: 0.3};
+var visNDVI  = {min: -1, max: 1, palette: ['blue','white','green']};
+var visNDWI  = {min: -1, max: 1, palette: ['red','white','blue']};
+var visScore = {min: 1, max: 5, palette: ['red','orange','yellow','lightgreen','green']};
+var visFS    = {min: 1, max: 5, palette: ['green','lightgreen','yellow','orange','red']};
+
+// =========================
+// Global Surface Water & distance
+// =========================
+var water = gsw.select('occurrence').clip(ROI1);
+Map.addLayer(water, {min: 0, max: 100, palette: ['white','cyan','blue']}, 'GSW Occurrence');
+
+var permanent = water.gt(40); // occurrence > 40% = "permanent-ish"
+Map.addLayer(permanent.selfMask(), {palette: ['blue']}, 'Permanent water');
+
+// Distance from permanent water (km)
+// fastDistanceTransform returns squared pixel distance; take sqrt and convert to meters via pixel area^0.5
+var distPix = permanent.fastDistanceTransform(30).sqrt();     // pixels
+var distM   = distPix.multiply(ee.Image.pixelArea().sqrt());  // meters
+var distanceKm = distM.divide(1000).clip(ROI1);               // km
+Map.addLayer(distanceKm, {min: 0, max: 25, palette: ['white','tan','brown']}, 'Distance to water (km)');
+
+// Only distance outside water, masked where DEM is valid
+var onlydistance = distanceKm.updateMask(distanceKm.neq(0)).updateMask(srtm.mask());
+Map.addLayer(onlydistance, {}, 'Distance outside water');
+
+// =========================
+// DEM & TPI
+// =========================
+var elevation = srtm.clip(ROI1);
+Map.addLayer(elevation, {}, 'Elevation (SRTM)');
+
+var TPI = elevation.subtract(elevation.focalMean(5)).rename('TPI');
+Map.addLayer(TPI, {}, 'TPI');
+
+// =========================
+// Landsat 8 TOA (2024, low cloud) + indices
+// =========================
+var landsat = ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')
+  .filterBounds(ROI1)
+  .filterDate('2024-01-01', '2024-12-31')
+  .filter(ee.Filter.lt('CLOUD_COVER', 10));
+
+var image2 = landsat.median().clip(ROI1);
+Map.addLayer(image2, visRGB, 'Landsat 8 TOA (2024 median)');
+
+var ndvi = image2.normalizedDifference(['B5','B4']).rename('NDVI');
+Map.addLayer(ndvi, visNDVI, 'NDVI');
+
+var ndwi = image2.normalizedDifference(['B3','B5']).rename('NDWI'); // McFeeters (Green, NIR)
+Map.addLayer(ndwi, visNDWI, 'NDWI');
+
+// =========================
+// Reclass to 1..5 (5 = highest hazard)
+// =========================
+
+// Distance score (thresholds are in km)
+var distanceScore = onlydistance
+  .where(onlydistance.lte(6.09), 5)
+  .where(onlydistance.gt(6.09).and(onlydistance.lte(12.18)), 4)
+  .where(onlydistance.gt(12.18).and(onlydistance.lte(18.27)), 3)
+  .where(onlydistance.gt(18.27).and(onlydistance.lte(24.36)), 2)
+  .where(onlydistance.gt(24.36), 1)
+  .rename('distanceScore');
+Map.addLayer(distanceScore, visScore, 'Distance Score');
+
+// Elevation score (mask to non-water distances)
+var elevationScore = elevation.updateMask(distanceKm.neq(0))
+  .where(elevation.gt(16.76), 1)
+  .where(elevation.gt(12.14).and(elevation.lte(16.76)), 2)
+  .where(elevation.gt(9.84).and(elevation.lte(12.14)), 3)
+  .where(elevation.gt(7.54).and(elevation.lte(9.84)), 4)
+  .where(elevation.lte(7.54), 5)
+  .rename('elevationScore');
+Map.addLayer(elevationScore, visScore, 'Elevation Score');
+
+// TPI score
+var tpiScore = TPI.updateMask(distanceKm.neq(0))
+  .where(TPI.gt(7.67), 1)
+  .where(TPI.gt(4.63).and(TPI.lte(7.67)), 2)
+  .where(TPI.gt(1.59).and(TPI.lte(4.63)), 3)
+  .where(TPI.gt(-1.43).and(TPI.lte(1.59)), 4)
+  .where(TPI.lte(-1.43), 5)
+  .rename('tpiScore');
+Map.addLayer(tpiScore, visScore, 'TPI Score');
+
+// NDVI score (lower vegetation = higher hazard)
+var ndviScore = ndvi
+  .where(ndvi.lte(-0.02), 5)
+  .where(ndvi.gt(-0.02).and(ndvi.lte(0.16)), 4)
+  .where(ndvi.gt(0.16).and(ndvi.lte(0.34)), 3)
+  .where(ndvi.gt(0.34).and(ndvi.lte(0.52)), 2)
+  .where(ndvi.gt(0.52), 1)
+  .rename('ndviScore');
+Map.addLayer(ndviScore, visScore, 'NDVI Score');
+
+// NDWI score (wetter = higher hazard)
+var ndwiScore = ndwi
+  .where(ndwi.lte(-0.352), 5)
+  .where(ndwi.gt(-0.352).and(ndwi.lte(-0.175)), 4)
+  .where(ndwi.gt(-0.175).and(ndwi.lte(0.002)), 3)
+  .where(ndwi.gt(0.002).and(ndwi.lte(0.179)), 2)
+  .where(ndwi.gt(0.179), 1)
+  .rename('ndwiScore');
+Map.addLayer(ndwiScore, visScore, 'NDWI Score');
+
+// =========================
+// Flood Susceptibility (average of 5 layers) & classes
+// =========================
+var floodSusceptibility = distanceScore
+  .add(elevationScore)
+  .add(tpiScore)
+  .add(ndviScore)
+  .add(ndwiScore)
+  .divide(5)
+  .rename('FSI');
+Map.addLayer(floodSusceptibility, visFS, 'Flood Susceptibility Index');
+
+var floodClass = floodSusceptibility
+  .where(floodSusceptibility.lte(1.8), 1)
+  .where(floodSusceptibility.gt(1.8).and(floodSusceptibility.lte(2.6)), 2)
+  .where(floodSusceptibility.gt(2.6).and(floodSusceptibility.lte(3.4)), 3)
+  .where(floodSusceptibility.gt(3.4).and(floodSusceptibility.lte(4.2)), 4)
+  .where(floodSusceptibility.gt(4.2), 5)
+  .toByte()
+  .rename('FS_class');
+
+Map.addLayer(floodClass, visFS, 'Flood Susceptibility Classes');
+
+// =========================
+/* Export */
+// =========================
+Export.image.toDrive({
+  image: floodClass,
+  description: 'Flood_Susceptibility_Habiganj',
+  folder: 'GEE_Flood',
+  region: ROI1,                 // Already a geometry
+  scale: 30,
+  maxPixels: 1e13
+});
