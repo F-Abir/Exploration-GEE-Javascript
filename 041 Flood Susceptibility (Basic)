@@ -1,0 +1,74 @@
+// ---------------- Flood Susceptibility — Bangladesh ----------------
+
+// 0) Study area: Bangladesh boundary (GAUL level1)
+var bangladesh = ee.FeatureCollection('FAO/GAUL/2015/level1')
+  .filter(ee.Filter.eq('ADM0_NAME','Bangladesh'));
+Map.centerObject(bangladesh, 7);
+
+// 1) Elevation & Slope from SRTM
+var dem = ee.Image('USGS/SRTMGL1_003').clip(bangladesh);
+var slope = ee.Terrain.slope(dem);
+
+// 2) Precipitation (CHIRPS mean 2018–2023)
+var startDate = '2018-01-01';
+var endDate   = '2023-12-31';
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterBounds(bangladesh)
+  .filterDate(startDate, endDate)
+  .select('precipitation');
+var meanPrecip = chirps.mean().clip(bangladesh);
+
+// 3) Land cover (ESA WorldCover 2021) – we’ll derive impervious area fraction
+var landcover = ee.Image('ESA/WorldCover/v200/2021').clip(bangladesh);
+// Impervious = 50 (built-up). See ESA class definitions
+var impervious = landcover.eq(50).selfMask();
+
+// 4) Distance to rivers (optional) using JRC Global Surface Water
+var waterOcc = ee.Image('JRC/GSW1_4/GlobalSurfaceWater').select('occurrence').clip(bangladesh);
+var permanentWater = waterOcc.gt(50).selfMask(); // permanent water >50% occurrence
+var distanceToWater = permanentWater.fastDistanceTransform(30).sqrt();
+
+// 5) Normalize helper (safe)
+function normalize(image, minVal, maxVal){
+  var minN = ee.Number(minVal);
+  var maxN = ee.Number(maxVal);
+  var denom = maxN.subtract(minN);
+  denom = ee.Algorithms.If(denom.eq(0), ee.Number(1), denom);
+  denom = ee.Number(denom);
+  var minImg = ee.Image.constant(minN);
+  var denomImg = ee.Image.constant(denom);
+  return image.subtract(minImg).divide(denomImg).clamp(0,1);
+}
+
+// 6) Normalize each predictor (adjust ranges to local conditions)
+var elevNorm = normalize(dem, 0, 50).rename('elev_norm'); // low elevation = high flood risk
+var slopeNorm = normalize(slope, 0, 5).rename('slope_norm'); // low slope = high risk
+var precipNorm = normalize(meanPrecip, 0, 20).rename('precip_norm'); // high precip = high risk
+var distWaterNorm = normalize(distanceToWater, 0, 5000).rename('distwater_norm'); // far from water = low risk
+
+// Invert some layers so higher number = higher flood risk
+var lowElev = ee.Image(1).subtract(elevNorm);
+var lowSlope = ee.Image(1).subtract(slopeNorm);
+var nearWater = ee.Image(1).subtract(distWaterNorm);
+var imperviousFloat = impervious.unmask(0).rename('impervious');
+
+// 7) Weighted overlay: example weights
+var w_elev = 0.4;
+var w_slope = 0.2;
+var w_precip = 0.3;
+var w_imperv = 0.1;
+
+var floodSusceptibility = lowElev.multiply(w_elev)
+  .add(lowSlope.multiply(w_slope))
+  .add(precipNorm.multiply(w_precip))
+  .add(imperviousFloat.multiply(w_imperv))
+  .clip(bangladesh)
+  .clamp(0,1)
+  .rename('flood_susceptibility');
+
+// 8) Visualize
+Map.addLayer(floodSusceptibility, {min:0, max:1, palette:['green','yellow','orange','red']}, 'Flood Susceptibility');
+
+// 9) Classify into 5 classes
+var floodClass = floodSusceptibility.multiply(4).round().toInt();
+Map.addLayer(floodClass, {min:0,max:4,palette:['#2b7bb9','#7fc8f8','#ffffb2','#ffcc66','#ff7f50']}, 'Flood Susceptibility Classes');
